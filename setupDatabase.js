@@ -77,6 +77,14 @@ console.log("All tables created successfully");
 
 // ─── Load Products from CSV ───────────────────────────────────────────────────
 
+// Check if products already loaded
+const existingCount = db.prepare('SELECT COUNT(*) as count FROM products').get();
+if (existingCount.count > 0) {
+    console.log(`Products already loaded: ${existingCount.count} products`);
+    db.close();
+    process.exit(0);
+}
+
 const csvContent = fs.readFileSync('products.csv', 'utf8');
 const records = parse(csvContent, {
     columns: true,
