@@ -1,3 +1,4 @@
+require('dotenv').config();
 // Only load .env file in local development
 const express = require('express');
 const twilio = require('twilio');
