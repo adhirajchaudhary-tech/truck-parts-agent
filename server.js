@@ -1,5 +1,4 @@
 // Only load .env file in local development
-if (process.env.NODE_ENV !== 'production') {
 }
 const express = require('express');
 const twilio = require('twilio');
