@@ -1,5 +1,4 @@
 // Only load .env file in local development
-}
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
