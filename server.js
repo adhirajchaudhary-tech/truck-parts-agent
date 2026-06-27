@@ -13,6 +13,10 @@ app.use(express.json());
 
 const client = new Anthropic();
 const db = new Database('durauto.db');
+console.log('TWILIO_SID exists:', !!process.env.TWILIO_ACCOUNT_SID);
+console.log('TWILIO_TOKEN exists:', !!process.env.TWILIO_AUTH_TOKEN);
+console.log('ANTHROPIC_KEY exists:', !!process.env.ANTHROPIC_API_KEY);
+
 const twilioClient = twilio(
     process.env.TWILIO_ACCOUNT_SID,
     process.env.TWILIO_AUTH_TOKEN
