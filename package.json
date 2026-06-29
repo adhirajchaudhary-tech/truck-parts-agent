@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "bash start.sh"
-  },
+    "start": "node initDb.js && node setupDatabase.js && node server.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
