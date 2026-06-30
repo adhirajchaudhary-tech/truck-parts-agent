@@ -215,6 +215,7 @@ PRODUCT FOUND:
         messageLower.includes('previous order') ||
         messageLower.includes('what did i order')) {
         const orderHistory = getOrderHistory(customer.customer_id);
+        console.log(`Order history lookup for ${customer.customer_id}: found ${orderHistory.length} orders`);
         if (orderHistory.length > 0) {
             orderContext = '\nORDER HISTORY:\n';
             for (const order of orderHistory) {
@@ -245,7 +246,7 @@ PRODUCT FOUND:
     let vertusReply = response.content[0].text;
 
     // Check if Vertus wants to save an order
-    const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]+)\]/g)];
+    const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]*)\]/g)];
 
     if (saveOrderMatches.length > 0) {
         // Only save if ALL items have valid part numbers and quantities
