@@ -1,9 +1,10 @@
 require('dotenv').config({ path: '/app/.env' });
-// Only load .env file in local development
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const Database = require('better-sqlite3');
+const path = require('path');
+const { generateInvoice } = require('./generateInvoice');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -20,8 +21,6 @@ const twilioClient = twilio(
     process.env.TWILIO_AUTH_TOKEN
 );
 
-// ─── Store conversations in memory ───────────────────────────────────────────
-// Each customer's conversation history is stored by their phone number
 const conversations = {};
 
 // ─── Database Functions ───────────────────────────────────────────────────────
@@ -67,9 +66,10 @@ function findProduct(searchTerm) {
 }
 
 function generateOrderId() {
+    // Start from DRA1002 (DRA1001 was the first manual invoice)
     const count = db.prepare('SELECT COUNT(*) as count FROM orders').get();
-    const next = (count.count + 1).toString().padStart(4, '0');
-    return `ORD-${next}`;
+    const next = 1001 + count.count + 1;
+    return `DRA${next}`;
 }
 
 function saveOrder(customerId, items) {
@@ -173,14 +173,12 @@ What you don't do:
 async function chat(customerPhone, userMessage) {
     const customer = findOrCreateCustomer(customerPhone);
 
-    // Initialize conversation history for this customer if needed
     if (!conversations[customerPhone]) {
         conversations[customerPhone] = [];
     }
 
     const history = conversations[customerPhone];
 
-    // Find products mentioned in the message
     const words = userMessage.split(/\s+/);
     let productContext = '';
 
@@ -207,7 +205,6 @@ PRODUCT FOUND:
         }
     }
 
-    // Add order history if customer asks
     const messageLower = userMessage.toLowerCase();
     let orderContext = '';
     if (messageLower.includes('history') ||
@@ -245,11 +242,9 @@ PRODUCT FOUND:
 
     let vertusReply = response.content[0].text;
 
-    // Check if Vertus wants to save an order
     const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]*)\]/g)];
 
     if (saveOrderMatches.length > 0) {
-        // Only save if ALL items have valid part numbers and quantities
         const items = saveOrderMatches.map(match => ({
             durauto_part_number: match[1].trim(),
             quantity: parseInt(match[2]),
@@ -270,8 +265,19 @@ PRODUCT FOUND:
             const orderId = saveOrder(customer.customer_id, items);
             vertusReply = vertusReply.replace(/\[SAVE_ORDER:[^\]]+\]/g, '').trim();
             console.log(`Order ${orderId} saved for ${customer.store_name}`);
+
+            // Generate and send PDF invoice
+            try {
+                const order = db.prepare('SELECT * FROM orders WHERE order_id = ?').get(orderId);
+                const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
+                const invoiceUrl = await generateInvoice(order, customer, orderItems);
+
+                // Return both the reply and invoice URL
+                return { reply: vertusReply, invoiceUrl };
+            } catch (invoiceError) {
+                console.error('Invoice generation error:', invoiceError.message);
+            }
         } else {
-            // Strip the malformed tag without saving
             vertusReply = vertusReply.replace(/\[SAVE_ORDER:[^\]]+\]/g, '').trim();
             console.log('Blocked invalid SAVE_ORDER tag');
         }
@@ -282,13 +288,12 @@ PRODUCT FOUND:
         content: vertusReply
     });
 
-    return vertusReply;
+    return { reply: vertusReply, invoiceUrl: null };
 }
 
 // ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
 
 app.post('/webhook', async (req, res) => {
-    // Log everything Twilio sends us
     console.log('--- INCOMING REQUEST ---');
     console.log(JSON.stringify(req.body, null, 2));
     console.log('------------------------');
@@ -298,17 +303,14 @@ app.post('/webhook', async (req, res) => {
     const messageSid = req.body.MessageSid;
     const messageStatus = req.body.MessageStatus;
 
-    // Ignore Twilio status callbacks — these have no Body
     if (!incomingMessage || !fromNumber) {
         return res.sendStatus(200);
     }
 
-    // Ignore if this is a status update not a real message
     if (messageStatus && !messageSid) {
         return res.sendStatus(200);
     }
 
-    // Only process messages that come FROM customers (not from our own number)
     if (fromNumber === process.env.TWILIO_WHATSAPP_NUMBER) {
         return res.sendStatus(200);
     }
@@ -316,18 +318,29 @@ app.post('/webhook', async (req, res) => {
     console.log(`Message from ${fromNumber}: ${incomingMessage}`);
 
     try {
-        const reply = await chat(fromNumber, incomingMessage);
+        const { reply, invoiceUrl } = await chat(fromNumber, incomingMessage);
 
         console.log('--- VERTUS REPLY ---');
         console.log(reply);
         console.log('--------------------');
 
-        // Send reply back via Twilio
+        // Send the text reply
         await twilioClient.messages.create({
             from: process.env.TWILIO_WHATSAPP_NUMBER,
             to: fromNumber,
             body: reply
         });
+
+        // If there's an invoice, send it as a second message
+        if (invoiceUrl) {
+            await twilioClient.messages.create({
+                from: process.env.TWILIO_WHATSAPP_NUMBER,
+                to: fromNumber,
+                body: '📄 Your invoice:',
+                mediaUrl: [invoiceUrl]
+            });
+            console.log(`Invoice sent: ${invoiceUrl}`);
+        }
 
         console.log(`Reply sent to ${fromNumber}`);
     } catch (error) {
