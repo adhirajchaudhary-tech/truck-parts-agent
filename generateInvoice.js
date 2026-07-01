@@ -8,6 +8,11 @@ cloudinary.config({
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET
 });
+console.log('Cloudinary config:', {
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'MISSING',
+    api_key: process.env.CLOUDINARY_API_KEY ? 'EXISTS' : 'MISSING',
+    api_secret: process.env.CLOUDINARY_API_SECRET ? 'EXISTS' : 'MISSING'
+});
 
 async function generateInvoice(order, customer, items) {
     // Download logo first
@@ -201,7 +206,7 @@ fs.unlinkSync(tempPath);
 if (fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
 
 // Add .pdf extension so WhatsApp can open it
-const pdfUrl = result.secure_url + '.pdf';
+const pdfUrl = result.secure_url;
 console.log(`Invoice uploaded: ${pdfUrl}`);
 resolve(pdfUrl);
             } catch (err) {
