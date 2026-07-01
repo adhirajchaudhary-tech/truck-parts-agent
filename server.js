@@ -391,7 +391,7 @@ app.get('/invoices/:filename', (req, res) => {
     }
 });
 
-// ─── Temporary Admin Routes ───────────────────────────────────────────────────
+// ─── Admin Routes ─────────────────────────────────────────────────────────────
 
 app.get('/admin/view', (req, res) => {
     const { secret } = req.query;
@@ -431,6 +431,67 @@ app.get('/admin/set-price', (req, res) => {
         });
     } catch (err) {
         res.status(500).send('Error: ' + err.message);
+    }
+});
+
+app.get('/admin/import-pricing', async (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const axios = require('axios');
+        const { parse } = require('csv-parse/sync');
+
+        const response = await axios.get(
+            'https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/pricing.csv'
+        );
+
+        const records = parse(response.data, {
+            columns: true,
+            skip_empty_lines: true,
+            trim: true
+        });
+
+        const insertPrice = db.prepare(`
+            INSERT OR REPLACE INTO customer_pricing 
+            (customer_id, durauto_part_number, price, notes)
+            VALUES (?, ?, ?, ?)
+        `);
+
+        let successCount = 0;
+        let errorCount = 0;
+        const results = [];
+
+        for (const record of records) {
+            const customerId = record['customer_id'] || '';
+            const partNumber = record['durauto_part_number'] || '';
+            const price = parseFloat(record['price'] || '0');
+            const notes = record['notes'] || '';
+
+            if (!customerId || !partNumber || isNaN(price)) {
+                errorCount++;
+                continue;
+            }
+
+            try {
+                insertPrice.run(customerId, partNumber, price, notes);
+                results.push(`✅ ${customerId} — ${partNumber} — $${price.toFixed(2)}`);
+                successCount++;
+            } catch (err) {
+                results.push(`❌ ${partNumber}: ${err.message}`);
+                errorCount++;
+            }
+        }
+
+        res.json({
+            success: true,
+            imported: successCount,
+            errors: errorCount,
+            details: results
+        });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
