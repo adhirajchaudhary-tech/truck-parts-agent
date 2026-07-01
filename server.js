@@ -4,6 +4,7 @@ const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
 const { generateInvoice } = require('./generateInvoice');
 
 const app = express();
@@ -66,7 +67,6 @@ function findProduct(searchTerm) {
 }
 
 function generateOrderId() {
-    // Start from DRA1002 (DRA1001 was the first manual invoice)
     const count = db.prepare('SELECT COUNT(*) as count FROM orders').get();
     const next = 1001 + count.count + 1;
     return `DRA${next}`;
@@ -266,13 +266,20 @@ PRODUCT FOUND:
             vertusReply = vertusReply.replace(/\[SAVE_ORDER:[^\]]+\]/g, '').trim();
             console.log(`Order ${orderId} saved for ${customer.store_name}`);
 
-            // Generate and send PDF invoice
             try {
                 const order = db.prepare('SELECT * FROM orders WHERE order_id = ?').get(orderId);
                 const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
-                const invoiceUrl = await generateInvoice(order, customer, orderItems);
+                const invoiceFilePath = await generateInvoice(order, customer, orderItems);
+                const invoiceFileName = `invoice_${orderId}.pdf`;
+                const invoiceUrl = `https://truck-parts-agent.onrender.com/invoices/${invoiceFileName}`;
+                console.log(`Invoice generated at: ${invoiceFilePath}`);
+                console.log(`Invoice URL: ${invoiceUrl}`);
 
-                // Return both the reply and invoice URL
+                history.push({
+                    role: "assistant",
+                    content: vertusReply
+                });
+
                 return { reply: vertusReply, invoiceUrl };
             } catch (invoiceError) {
                 console.error('Invoice generation error:', invoiceError.message);
@@ -324,14 +331,12 @@ app.post('/webhook', async (req, res) => {
         console.log(reply);
         console.log('--------------------');
 
-        // Send the text reply
         await twilioClient.messages.create({
             from: process.env.TWILIO_WHATSAPP_NUMBER,
             to: fromNumber,
             body: reply
         });
 
-        // If there's an invoice, send it as a second message
         if (invoiceUrl) {
             await twilioClient.messages.create({
                 from: process.env.TWILIO_WHATSAPP_NUMBER,
@@ -348,6 +353,19 @@ app.post('/webhook', async (req, res) => {
     }
 
     res.sendStatus(200);
+});
+
+// ─── Serve Invoice PDFs ───────────────────────────────────────────────────────
+
+app.get('/invoices/:filename', (req, res) => {
+    const filePath = `/tmp/invoices/${req.params.filename}`;
+    if (fs.existsSync(filePath)) {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${req.params.filename}"`);
+        res.sendFile(path.resolve(filePath));
+    } else {
+        res.status(404).send('Invoice not found');
+    }
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────

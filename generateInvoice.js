@@ -1,22 +1,10 @@
 const PDFDocument = require('pdfkit');
-const cloudinary = require('cloudinary').v2;
 const fs = require('fs');
 const axios = require('axios');
 
-cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET
-});
-console.log('Cloudinary config:', {
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'MISSING',
-    api_key: process.env.CLOUDINARY_API_KEY ? 'EXISTS' : 'MISSING',
-    api_secret: process.env.CLOUDINARY_API_SECRET ? 'EXISTS' : 'MISSING'
-});
-
 async function generateInvoice(order, customer, items) {
-    // Download logo first
-    const logoPath = `/tmp/durauto_logo.png`;
+    // Download logo
+    const logoPath = `/tmp/durauto_logo_${order.order_id}.png`;
     try {
         const logoResponse = await axios.get(
             'https://res.cloudinary.com/ulor4ikf/image/upload/v1782852493/Durauto_logo_truck_and_trailer_parts_print_ready_xbsptj.png',
@@ -29,8 +17,16 @@ async function generateInvoice(order, customer, items) {
 
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ margin: 50 });
-        const tempPath = `/tmp/invoice_${order.order_id}.pdf`;
-        const stream = fs.createWriteStream(tempPath);
+
+        // Save to public directory so Render can serve it
+        const publicDir = '/tmp/invoices';
+        if (!fs.existsSync(publicDir)) {
+            fs.mkdirSync(publicDir, { recursive: true });
+        }
+
+        const fileName = `invoice_${order.order_id}.pdf`;
+        const filePath = `${publicDir}/${fileName}`;
+        const stream = fs.createWriteStream(filePath);
 
         doc.pipe(stream);
 
@@ -50,12 +46,10 @@ async function generateInvoice(order, customer, items) {
         // ─── Header: Logo + Company Info + Contact ────────────
         const headerTop = doc.y;
 
-        // Logo
         if (fs.existsSync(logoPath)) {
             doc.image(logoPath, 50, headerTop, { width: 130 });
         }
 
-        // Company info below logo
         doc.fontSize(11).fillColor(blue).font('Helvetica-Bold')
             .text('Durauto Parts LLC', 50, headerTop + 70);
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
@@ -63,12 +57,10 @@ async function generateInvoice(order, customer, items) {
             .text('Houston, TX 77034, United States', 50, doc.y + 3)
             .text('Powering Through Loads', 50, doc.y + 3);
 
-        // Contact info on the right
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
             .text('Email: adhirajchaudhary@gmail.com', 300, headerTop + 10, { align: 'right', width: 262 })
             .text('Website: https://durautopartsusa.com/', 300, doc.y + 4, { align: 'right', width: 262 });
 
-        // Move past header
         doc.moveDown(3);
         doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(borderGray).stroke();
         doc.moveDown(0.5);
@@ -77,26 +69,22 @@ async function generateInvoice(order, customer, items) {
         const metaTop = doc.y;
         const colW = 128;
 
-        // Labels
         doc.fontSize(8).fillColor('#888888').font('Helvetica')
             .text('INVOICE NO', 50, metaTop)
             .text('INVOICE DATE', 50 + colW, metaTop)
             .text('PAYMENT STATUS', 50 + colW * 2, metaTop)
             .text('TOTAL AMOUNT', 50 + colW * 3, metaTop);
 
-        // Calculate total
         let total = 0;
         items.forEach(item => {
             const price = parseFloat(item.price_at_order) || 0;
             total += price * item.quantity;
         });
 
-        // Format date
         const invoiceDate = new Date(order.created_at).toLocaleDateString('en-US', {
             day: '2-digit', month: 'short', year: 'numeric'
         });
 
-        // Values
         doc.fontSize(10).fillColor(darkGray).font('Helvetica-Bold')
             .text(`#${order.order_id}`, 50, metaTop + 15)
             .text(invoiceDate, 50 + colW, metaTop + 15);
@@ -192,31 +180,10 @@ async function generateInvoice(order, customer, items) {
 
         doc.end();
 
-        stream.on('finish', async () => {
-            try {
-                // Upload PDF to Cloudinary
-               const result = await cloudinary.uploader.upload(tempPath, {
-    resource_type: 'raw',
-    public_id: `invoices/invoice_${order.order_id}.pdf`,
-    use_filename: false,
-    unique_filename: false,
-    overwrite: true,
-    access_mode: 'public'
-});
-
-// Clean up temp files
-fs.unlinkSync(tempPath);
-if (fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
-
-// Add .pdf extension so WhatsApp can open it
-// Force correct public URL
-const pdfUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/invoices/invoice_${order.order_id}.pdf`;
-console.log('PDF public URL:', pdfUrl);
-console.log(`Invoice uploaded: ${pdfUrl}`);
-resolve(pdfUrl);
-            } catch (err) {
-                reject(err);
-            }
+        stream.on('finish', () => {
+            // Return the file path — server.js will serve it
+            console.log(`Invoice generated: ${filePath}`);
+            resolve(filePath);
         });
 
         stream.on('error', reject);
