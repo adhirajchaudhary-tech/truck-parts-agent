@@ -16,9 +16,8 @@ async function generateInvoice(order, customer, items) {
     }
 
     return new Promise((resolve, reject) => {
-        const doc = new PDFDocument({ margin: 50 });
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
 
-        // Save to public directory so Render can serve it
         const publicDir = '/tmp/invoices';
         if (!fs.existsSync(publicDir)) {
             fs.mkdirSync(publicDir, { recursive: true });
@@ -37,44 +36,45 @@ async function generateInvoice(order, customer, items) {
         const blue = '#1a5276';
 
         // ─── Title ────────────────────────────────────────────
-        doc.fontSize(22).fillColor(darkGray).font('Helvetica')
-            .text('Invoice', { align: 'center' });
-        doc.moveDown(0.5);
-        doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(borderGray).stroke();
-        doc.moveDown(0.5);
+        doc.fontSize(20).fillColor(darkGray).font('Helvetica')
+            .text('Invoice', 50, 40, { align: 'center', width: 495 });
 
-        // ─── Header: Logo + Company Info + Contact ────────────
-        const headerTop = doc.y;
+        doc.moveTo(50, 65).lineTo(545, 65).strokeColor(borderGray).lineWidth(1).stroke();
 
+        // ─── Header Section ───────────────────────────────────
+        // Logo top left
         if (fs.existsSync(logoPath)) {
-            doc.image(logoPath, 50, headerTop, { width: 130 });
+            doc.image(logoPath, 50, 75, { width: 120 });
         }
 
+        // Contact info top right
+        doc.fontSize(9).fillColor(darkGray).font('Helvetica')
+            .text('Email: adhirajchaudhary@gmail.com', 300, 80, { align: 'right', width: 245 })
+            .text('Website: https://durautopartsusa.com/', 300, 95, { align: 'right', width: 245 });
+
+        // Company info below logo — starts at y=155 to clear the logo
         doc.fontSize(11).fillColor(blue).font('Helvetica-Bold')
-            .text('Durauto Parts LLC', 50, headerTop + 70);
+            .text('Durauto Parts LLC', 50, 155);
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
-            .text('9100 Galveston Rd', 50, doc.y + 3)
-            .text('Houston, TX 77034, United States', 50, doc.y + 3)
-            .text('Powering Through Loads', 50, doc.y + 3);
+            .text('9100 Galveston Rd', 50, 170)
+            .text('Houston, TX 77034, United States', 50, 183)
+            .text('Powering Through Loads', 50, 196);
 
-        doc.fontSize(9).fillColor(darkGray).font('Helvetica')
-            .text('Email: adhirajchaudhary@gmail.com', 300, headerTop + 10, { align: 'right', width: 262 })
-            .text('Website: https://durautopartsusa.com/', 300, doc.y + 4, { align: 'right', width: 262 });
-
-        doc.moveDown(3);
-        doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(borderGray).stroke();
-        doc.moveDown(0.5);
+        // Divider after header
+        doc.moveTo(50, 215).lineTo(545, 215).strokeColor(borderGray).lineWidth(1).stroke();
 
         // ─── Invoice Meta Row ──────────────────────────────────
-        const metaTop = doc.y;
-        const colW = 128;
+        const metaY = 225;
+        const colW = 123;
 
+        // Labels
         doc.fontSize(8).fillColor('#888888').font('Helvetica')
-            .text('INVOICE NO', 50, metaTop)
-            .text('INVOICE DATE', 50 + colW, metaTop)
-            .text('PAYMENT STATUS', 50 + colW * 2, metaTop)
-            .text('TOTAL AMOUNT', 50 + colW * 3, metaTop);
+            .text('INVOICE NO', 50, metaY)
+            .text('INVOICE DATE', 50 + colW, metaY)
+            .text('PAYMENT STATUS', 50 + colW * 2, metaY)
+            .text('TOTAL AMOUNT', 50 + colW * 3, metaY);
 
+        // Calculate total
         let total = 0;
         items.forEach(item => {
             const price = parseFloat(item.price_at_order) || 0;
@@ -85,62 +85,61 @@ async function generateInvoice(order, customer, items) {
             day: '2-digit', month: 'short', year: 'numeric'
         });
 
+        // Values
         doc.fontSize(10).fillColor(darkGray).font('Helvetica-Bold')
-            .text(`#${order.order_id}`, 50, metaTop + 15)
-            .text(invoiceDate, 50 + colW, metaTop + 15);
+            .text(`#${order.order_id}`, 50, metaY + 14)
+            .text(invoiceDate, 50 + colW, metaY + 14);
         doc.font('Helvetica')
-            .text('Net 30', 50 + colW * 2, metaTop + 15);
+            .text('Net 30', 50 + colW * 2, metaY + 14);
         doc.font('Helvetica-Bold')
-            .text(`$ ${total.toFixed(2)}`, 50 + colW * 3, metaTop + 15);
+            .text(`$ ${total.toFixed(2)}`, 50 + colW * 3, metaY + 14);
 
-        doc.moveDown(2.5);
-        doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(borderGray).stroke();
-        doc.moveDown(0.5);
+        // Divider
+        doc.moveTo(50, metaY + 35).lineTo(545, metaY + 35).strokeColor(borderGray).lineWidth(1).stroke();
 
         // ─── Billing / Shipping Address ────────────────────────
-        const addrTop = doc.y;
+        const addrY = metaY + 45;
 
         doc.fontSize(8).fillColor('#888888').font('Helvetica')
-            .text('BILLING ADDRESS', 50, addrTop)
-            .text('SHIPPING ADDRESS', 300, addrTop);
+            .text('BILLING ADDRESS', 50, addrY)
+            .text('SHIPPING ADDRESS', 300, addrY);
 
         const storeName = customer.store_name || 'Unknown Store';
         const address = customer.address || '';
         const phone = customer.phone ? customer.phone.replace('whatsapp:', '') : '';
 
         doc.fontSize(10).fillColor(darkGray).font('Helvetica-Bold')
-            .text(storeName, 50, addrTop + 15)
-            .text(storeName, 300, addrTop + 15);
+            .text(storeName, 50, addrY + 14)
+            .text(storeName, 300, addrY + 14);
 
-        doc.fontSize(9).font('Helvetica')
-            .text(address, 50, addrTop + 30, { width: 220 })
-            .text(`Phone: ${phone}`, 50, addrTop + 45);
+        doc.fontSize(9).font('Helvetica').fillColor(darkGray)
+            .text(address, 50, addrY + 28, { width: 220 })
+            .text(`Phone: ${phone}`, 50, addrY + 41);
 
-        doc.fontSize(9).font('Helvetica')
-            .text(address, 300, addrTop + 30, { width: 220 })
-            .text(`Phone: ${phone}`, 300, addrTop + 45);
+        doc.fontSize(9).font('Helvetica').fillColor(darkGray)
+            .text(address, 300, addrY + 28, { width: 220 })
+            .text(`Phone: ${phone}`, 300, addrY + 41);
 
-        doc.moveDown(4);
-        doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(borderGray).stroke();
-        doc.moveDown(0.3);
+        // Divider
+        doc.moveTo(50, addrY + 62).lineTo(545, addrY + 62).strokeColor(borderGray).lineWidth(1).stroke();
 
         // ─── Items Table Header ────────────────────────────────
-        const tableTop = doc.y;
+        const tableY = addrY + 70;
 
-        doc.rect(50, tableTop, 512, 22).fillColor(lightGray).fill();
+        doc.rect(50, tableY, 495, 22).fillColor(lightGray).fill();
         doc.fontSize(9).fillColor(darkGray).font('Helvetica-Bold')
-            .text('#', 55, tableTop + 7)
-            .text('Product Details', 100, tableTop + 7)
-            .text('Unit Price', 320, tableTop + 7)
-            .text('Qty', 400, tableTop + 7)
-            .text('Tax', 440, tableTop + 7)
-            .text('Amount', 500, tableTop + 7);
+            .text('#', 55, tableY + 7)
+            .text('Product Details', 105, tableY + 7)
+            .text('Unit Price', 310, tableY + 7)
+            .text('Qty', 390, tableY + 7)
+            .text('Tax', 430, tableY + 7)
+            .text('Amount', 490, tableY + 7);
 
-        doc.moveTo(50, tableTop + 22).lineTo(562, tableTop + 22)
-            .strokeColor(borderGray).stroke();
+        doc.moveTo(50, tableY + 22).lineTo(545, tableY + 22)
+            .strokeColor(borderGray).lineWidth(1).stroke();
 
         // ─── Items ────────────────────────────────────────────
-        let rowY = tableTop + 30;
+        let rowY = tableY + 32;
         items.forEach((item) => {
             const price = parseFloat(item.price_at_order) || 0;
             const amount = price * item.quantity;
@@ -148,40 +147,40 @@ async function generateInvoice(order, customer, items) {
             doc.fontSize(9).fillColor(darkGray).font('Helvetica-Bold')
                 .text(item.durauto_part_number, 55, rowY);
             doc.font('Helvetica')
-                .text(item.part_name, 100, rowY, { width: 210 })
-                .text(`$ ${price.toFixed(2)}`, 320, rowY)
-                .text(item.quantity.toString(), 408, rowY)
-                .text('Tax Exempt', 435, rowY)
-                .text(`$${amount.toFixed(2)}`, 500, rowY);
+                .text(item.part_name, 105, rowY, { width: 195 })
+                .text(`$ ${price.toFixed(2)}`, 310, rowY)
+                .text(item.quantity.toString(), 398, rowY)
+                .text('Tax Exempt', 425, rowY)
+                .text(`$${amount.toFixed(2)}`, 490, rowY);
 
             rowY += 28;
-            doc.moveTo(50, rowY - 5).lineTo(562, rowY - 5)
-                .strokeColor(borderGray).stroke();
+            doc.moveTo(50, rowY - 5).lineTo(545, rowY - 5)
+                .strokeColor(borderGray).lineWidth(0.5).stroke();
         });
 
         // ─── Totals ───────────────────────────────────────────
-        const totalsX = 360;
+        const totalsX = 350;
         const totalsY = rowY + 10;
 
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
-            .text('Sub Total', totalsX, totalsY)
-            .text(`$ ${total.toFixed(2)}`, 500, totalsY)
-            .text('Shipping Charges', totalsX, totalsY + 18)
-            .text('$ 00.00', 500, totalsY + 18)
-            .text('Advance Amount', totalsX, totalsY + 36)
-            .text('$ 00.00', 500, totalsY + 36);
+            .text('Sub Total', totalsX, totalsY, { width: 130 })
+            .text(`$ ${total.toFixed(2)}`, 490, totalsY)
+            .text('Shipping Charges', totalsX, totalsY + 18, { width: 130 })
+            .text('$ 00.00', 490, totalsY + 18)
+            .text('Advance Amount', totalsX, totalsY + 36, { width: 130 })
+            .text('$ 00.00', 490, totalsY + 36);
 
-        doc.moveTo(totalsX, totalsY + 54).lineTo(562, totalsY + 54)
-            .strokeColor(borderGray).stroke();
+        doc.moveTo(totalsX, totalsY + 52).lineTo(545, totalsY + 52)
+            .strokeColor(borderGray).lineWidth(1).stroke();
 
         doc.fontSize(10).font('Helvetica-Bold').fillColor(darkGray)
-            .text('Total Amount', totalsX, totalsY + 62)
-            .text(`$ ${total.toFixed(2)}`, 500, totalsY + 62);
+            .text('Total Amount', totalsX, totalsY + 60, { width: 130 })
+            .text(`$ ${total.toFixed(2)}`, 490, totalsY + 60);
 
         doc.end();
 
         stream.on('finish', () => {
-            // Return the file path — server.js will serve it
+            if (fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
             console.log(`Invoice generated: ${filePath}`);
             resolve(filePath);
         });
