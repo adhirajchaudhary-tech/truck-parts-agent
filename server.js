@@ -65,22 +65,21 @@ function findProduct(searchTerm) {
 
     return product;
 }
-function getCustomerPrice(customerId, duarutoPartNumber) {
-    // Check if customer has a custom price for this part
+
+function getCustomerPrice(customerId, durautoPartNumber) {
     const customPrice = db.prepare(`
         SELECT price FROM customer_pricing
         WHERE customer_id = ? AND durauto_part_number = ?
-    `).get(customerId, duarutoPartNumber);
+    `).get(customerId, durautoPartNumber);
 
     if (customPrice) {
         return customPrice.price.toFixed(2);
     }
 
-    // Fall back to list price from products table
     const product = db.prepare(`
         SELECT price FROM products
         WHERE durauto_part_number = ?
-    `).get(duarutoPartNumber);
+    `).get(durautoPartNumber);
 
     return product && product.price ? product.price : null;
 }
@@ -126,7 +125,6 @@ function getOrderHistory(customerId) {
 }
 
 function findOrCreateCustomer(phone) {
-    // Normalize phone — strip whatsapp: prefix for consistent lookup
     const normalizedPhone = phone.replace('whatsapp:', '');
 
     let customer = db.prepare(`
@@ -147,25 +145,6 @@ function findOrCreateCustomer(phone) {
         `).get(normalizedPhone);
 
         console.log(`New customer created: ${customerId} — ${normalizedPhone}`);
-    }
-
-    return customer;
-}
-
-    if (!customer) {
-        const count = db.prepare('SELECT COUNT(*) as count FROM customers').get();
-        const customerId = `CUST-${(count.count + 1).toString().padStart(3, '0')}`;
-
-        db.prepare(`
-            INSERT INTO customers (customer_id, phone, store_name, contact_name)
-            VALUES (?, ?, 'Unknown Store', 'Unknown Contact')
-        `).run(customerId, phone);
-
-        customer = db.prepare(`
-            SELECT * FROM customers WHERE phone = ?
-        `).get(phone);
-
-        console.log(`New customer created: ${customerId} — ${phone}`);
     }
 
     return customer;
@@ -230,7 +209,7 @@ async function chat(customerPhone, userMessage) {
             if (product) {
                 const customerPrice = getCustomerPrice(customer.customer_id, product.durauto_part_number);
 
-productContext += `
+                productContext += `
 PRODUCT FOUND:
 - Durauto Part #: ${product.durauto_part_number}
 - Name: ${product.part_name}
@@ -315,7 +294,7 @@ PRODUCT FOUND:
                 const invoiceFilePath = await generateInvoice(order, customer, orderItems);
                 const invoiceFileName = `invoice_${orderId}.pdf`;
                 const invoiceUrl = `https://truck-parts-agent.onrender.com/invoices/${invoiceFileName}`;
-                console.log(`Invoice generated at: ${invoiceFilePath}`);
+                console.log(`Invoice generated: ${invoiceFilePath}`);
                 console.log(`Invoice URL: ${invoiceUrl}`);
 
                 history.push({
@@ -408,6 +387,49 @@ app.get('/invoices/:filename', (req, res) => {
         res.sendFile(path.resolve(filePath));
     } else {
         res.status(404).send('Invoice not found');
+    }
+});
+
+// ─── Temporary Admin Routes ───────────────────────────────────────────────────
+
+app.get('/admin/view', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    const customers = db.prepare('SELECT customer_id, phone, store_name FROM customers').all();
+    const pricing = db.prepare('SELECT * FROM customer_pricing').all();
+    res.json({ customers, pricing });
+});
+
+app.get('/admin/set-price', (req, res) => {
+    const { customer_id, part_number, price, secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    if (!customer_id || !part_number || !price) {
+        return res.send('Missing params. Use: ?secret=durauto2026&customer_id=CUST-001&part_number=DP-SC20&price=49.99');
+    }
+
+    try {
+        const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(customer_id);
+        if (!customer) {
+            const all = db.prepare('SELECT customer_id, phone, store_name FROM customers').all();
+            return res.json({ error: 'Customer not found', existing_customers: all });
+        }
+
+        db.prepare(`
+            INSERT OR REPLACE INTO customer_pricing 
+            (customer_id, durauto_part_number, price, notes)
+            VALUES (?, ?, ?, ?)
+        `).run(customer_id, part_number, parseFloat(price), 'Set via admin URL');
+
+        res.json({
+            success: true,
+            customer: customer.store_name,
+            part: part_number,
+            price: parseFloat(price)
+        });
+    } catch (err) {
+        res.status(500).send('Error: ' + err.message);
     }
 });
 
