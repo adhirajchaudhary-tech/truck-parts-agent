@@ -195,10 +195,13 @@ async function generateInvoice(order, customer, items) {
         stream.on('finish', async () => {
             try {
                 // Upload PDF to Cloudinary
-                const result = await cloudinary.uploader.upload(tempPath, {
+               const result = await cloudinary.uploader.upload(tempPath, {
     resource_type: 'raw',
-    public_id: `invoices/invoice_${order.order_id}`,
-    format: 'pdf'
+    public_id: `invoices/invoice_${order.order_id}.pdf`,
+    use_filename: false,
+    unique_filename: false,
+    overwrite: true,
+    access_mode: 'public'
 });
 
 // Clean up temp files
@@ -206,7 +209,9 @@ fs.unlinkSync(tempPath);
 if (fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
 
 // Add .pdf extension so WhatsApp can open it
-const pdfUrl = result.secure_url;
+// Force correct public URL
+const pdfUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/invoices/invoice_${order.order_id}.pdf`;
+console.log('PDF public URL:', pdfUrl);
 console.log(`Invoice uploaded: ${pdfUrl}`);
 resolve(pdfUrl);
             } catch (err) {
