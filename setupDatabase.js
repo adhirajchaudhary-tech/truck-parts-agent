@@ -2,7 +2,8 @@ const Database = require('better-sqlite3');
 const fs = require('fs');
 const { parse } = require('csv-parse/sync');
 
-const db = new Database('durauto.db');
+const dbPath = process.env.NODE_ENV === 'production' ? '/data/durauto.db' : 'durauto.db';
+const db = new Database(dbPath);
 
 // ─── Products Table ───────────────────────────────────────────────────────────
 

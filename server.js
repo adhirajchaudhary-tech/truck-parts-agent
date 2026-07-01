@@ -12,7 +12,8 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const client = new Anthropic();
-const db = new Database('durauto.db');
+const dbPath = process.env.NODE_ENV === 'production' ? '/data/durauto.db' : 'durauto.db';
+const db = new Database(dbPath);
 console.log('TWILIO_SID exists:', !!process.env.TWILIO_ACCOUNT_SID);
 console.log('TWILIO_TOKEN exists:', !!process.env.TWILIO_AUTH_TOKEN);
 console.log('ANTHROPIC_KEY exists:', !!process.env.ANTHROPIC_API_KEY);

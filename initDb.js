@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 
-const db = new Database('durauto.db');
+const dbPath = process.env.NODE_ENV === 'production' ? '/data/durauto.db' : 'durauto.db';
+const db = new Database(dbPath);
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS products (
