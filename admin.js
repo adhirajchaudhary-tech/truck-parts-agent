@@ -89,7 +89,8 @@ async function addCustomer() {
     const email = await question('Email (press Enter to skip): ');
     const address = await question('Address (press Enter to skip): ');
 
-    const existing = db.prepare('SELECT * FROM customers WHERE phone = ?').get(phone);
+    const normalizedPhone = phone.replace('whatsapp:', '');
+    const existing = db.prepare('SELECT * FROM customers WHERE phone = ? OR phone = ?').get(normalizedPhone, phone);
     if (existing) {
         console.log(`\n⚠️  A customer with that phone number already exists: ${existing.store_name} (${existing.customer_id})\n`);
         return;
@@ -99,9 +100,9 @@ async function addCustomer() {
     const customerId = `CUST-${(count.count + 1).toString().padStart(3, '0')}`;
 
     db.prepare(`
-        INSERT INTO customers (customer_id, store_name, contact_name, phone, email, address)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `).run(customerId, storeName, contactName, phone, email || '', address || '');
+    INSERT INTO customers (customer_id, store_name, contact_name, phone, email, address)
+    VALUES (?, ?, ?, ?, ?, ?)
+`).run(customerId, storeName, contactName, normalizedPhone, email || '', address || '');
 
     console.log(`\n✅ Customer added successfully!`);
     console.log(`   ID: ${customerId}`);

@@ -126,9 +126,31 @@ function getOrderHistory(customerId) {
 }
 
 function findOrCreateCustomer(phone) {
+    // Normalize phone — strip whatsapp: prefix for consistent lookup
+    const normalizedPhone = phone.replace('whatsapp:', '');
+
     let customer = db.prepare(`
-        SELECT * FROM customers WHERE phone = ?
-    `).get(phone);
+        SELECT * FROM customers WHERE phone = ? OR phone = ?
+    `).get(normalizedPhone, phone);
+
+    if (!customer) {
+        const count = db.prepare('SELECT COUNT(*) as count FROM customers').get();
+        const customerId = `CUST-${(count.count + 1).toString().padStart(3, '0')}`;
+
+        db.prepare(`
+            INSERT INTO customers (customer_id, phone, store_name, contact_name)
+            VALUES (?, ?, 'Unknown Store', 'Unknown Contact')
+        `).run(customerId, normalizedPhone);
+
+        customer = db.prepare(`
+            SELECT * FROM customers WHERE phone = ?
+        `).get(normalizedPhone);
+
+        console.log(`New customer created: ${customerId} — ${normalizedPhone}`);
+    }
+
+    return customer;
+}
 
     if (!customer) {
         const count = db.prepare('SELECT COUNT(*) as count FROM customers').get();
