@@ -61,4 +61,18 @@ db.exec(`
     )
 `);
 
+db.exec(`
+    CREATE TABLE IF NOT EXISTS customer_pricing (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id TEXT,
+        durauto_part_number TEXT,
+        price REAL,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(customer_id, durauto_part_number)
+    )
+`);
+
+console.log('Customer pricing table ready');
+
 db.close();

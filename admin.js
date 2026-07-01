@@ -67,7 +67,6 @@ function listOrders() {
             `${(order.status || '').padEnd(12)}`
         );
 
-        // Show items under each order
         const items = db.prepare(`
             SELECT * FROM order_items WHERE order_id = ?
         `).all(order.order_id);
@@ -86,11 +85,10 @@ async function addCustomer() {
 
     const storeName = await question('Store name: ');
     const contactName = await question('Contact person name: ');
-    let phone = await question('WhatsApp phone number (with country code, e.g. +12125551234): ');
+    const phone = await question('WhatsApp phone number (with country code, e.g. +12125551234): ');
     const email = await question('Email (press Enter to skip): ');
     const address = await question('Address (press Enter to skip): ');
 
-    // Check if phone already exists
     const existing = db.prepare('SELECT * FROM customers WHERE phone = ?').get(phone);
     if (existing) {
         console.log(`\n⚠️  A customer with that phone number already exists: ${existing.store_name} (${existing.customer_id})\n`);
@@ -161,7 +159,7 @@ async function updateOrderStatus() {
     console.log('\n── Update Order Status ──\n');
     listOrders();
 
-    const orderId = await question('Enter Order ID to update (e.g. ORD-0001): ');
+    const orderId = await question('Enter Order ID to update (e.g. DRA1002): ');
     const order = db.prepare('SELECT * FROM orders WHERE order_id = ?').get(orderId);
 
     if (!order) {
@@ -182,21 +180,133 @@ async function updateOrderStatus() {
     console.log(`\n✅ Order ${orderId} updated to: ${status}\n`);
 }
 
+// ─── Manage Customer Pricing ──────────────────────────────────────────────────
+
+async function managePricing() {
+    console.log('\n── Manage Customer Pricing ──\n');
+    console.log('1. View prices for a customer');
+    console.log('2. Set a price for a customer');
+    console.log('3. Remove a custom price');
+    console.log('4. Back to main menu\n');
+
+    const choice = await question('Choose an option (1-4): ');
+
+    switch (choice.trim()) {
+        case '1': {
+            listCustomers();
+            const customerId = await question('Enter Customer ID: ');
+            const prices = db.prepare(`
+                SELECT cp.*, p.part_name
+                FROM customer_pricing cp
+                LEFT JOIN products p ON cp.durauto_part_number = p.durauto_part_number
+                WHERE cp.customer_id = ?
+                ORDER BY cp.durauto_part_number
+            `).all(customerId);
+
+            if (prices.length === 0) {
+                console.log('\nNo custom prices set for this customer. List prices apply.\n');
+            } else {
+                console.log(`\n${'─'.repeat(65)}`);
+                console.log(`${'Part #'.padEnd(15)} ${'Part Name'.padEnd(35)} ${'Price'.padEnd(10)}`);
+                console.log(`${'─'.repeat(65)}`);
+                for (const p of prices) {
+                    console.log(
+                        `${(p.durauto_part_number || '').padEnd(15)} ` +
+                        `${(p.part_name || '').padEnd(35)} ` +
+                        `$${p.price.toFixed(2)}`
+                    );
+                }
+                console.log(`${'─'.repeat(65)}\n`);
+            }
+            break;
+        }
+
+        case '2': {
+            listCustomers();
+            const customerId = await question('Enter Customer ID: ');
+            const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(customerId);
+            if (!customer) {
+                console.log('\n⚠️  Customer not found.\n');
+                break;
+            }
+
+            const partNumber = await question('Enter Durauto Part # (e.g. DP-SC20): ');
+            const product = db.prepare('SELECT * FROM products WHERE durauto_part_number = ?').get(partNumber);
+            if (!product) {
+                console.log('\n⚠️  Part not found in catalog.\n');
+                break;
+            }
+
+            console.log(`\nPart: ${product.part_name}`);
+            console.log(`Current list price: ${product.price || 'Not set'}\n`);
+
+            const priceInput = await question('Enter custom price (e.g. 45.99): ');
+            const price = parseFloat(priceInput);
+            if (isNaN(price) || price < 0) {
+                console.log('\n⚠️  Invalid price.\n');
+                break;
+            }
+
+            const notes = await question('Notes (press Enter to skip): ');
+
+            db.prepare(`
+                INSERT OR REPLACE INTO customer_pricing 
+                (customer_id, durauto_part_number, price, notes)
+                VALUES (?, ?, ?, ?)
+            `).run(customerId, partNumber, price, notes || '');
+
+            console.log(`\n✅ Price set: ${customer.store_name} — ${partNumber} — $${price.toFixed(2)}\n`);
+            break;
+        }
+
+        case '3': {
+            listCustomers();
+            const customerId = await question('Enter Customer ID: ');
+            const partNumber = await question('Enter Durauto Part # to remove: ');
+
+            const existing = db.prepare(`
+                SELECT * FROM customer_pricing 
+                WHERE customer_id = ? AND durauto_part_number = ?
+            `).get(customerId, partNumber);
+
+            if (!existing) {
+                console.log('\n⚠️  No custom price found for that customer and part.\n');
+                break;
+            }
+
+            db.prepare(`
+                DELETE FROM customer_pricing 
+                WHERE customer_id = ? AND durauto_part_number = ?
+            `).run(customerId, partNumber);
+
+            console.log('\n✅ Custom price removed. List price will now apply.\n');
+            break;
+        }
+
+        case '4':
+            return;
+
+        default:
+            console.log('\n⚠️  Invalid option.\n');
+    }
+}
+
 // ─── Main Menu ────────────────────────────────────────────────────────────────
 
 async function mainMenu() {
-    console.log('\n╔════════════════════════════════╗');
-    console.log('║   Durauto Parts — Admin Panel  ║');
-    console.log('╠════════════════════════════════╣');
-    console.log('║  1. View all customers         ║');
-    console.log('║  2. View all orders            ║');
-    console.log('║  3. Add new customer           ║');
-    console.log('║  4. Edit customer              ║');
-    console.log('║  5. Update order status        ║');
-    console.log('║  6. Exit                       ║');
-    console.log('╚════════════════════════════════╝\n');
+    console.log('\n╔════════════════════════════════════╗');
+    console.log('║   Durauto Parts — Admin Panel      ║');
+    console.log('╠════════════════════════════════════╣');
+    console.log('║  1. View all customers             ║');
+    console.log('║  2. View all orders                ║');
+    console.log('║  3. Add new customer               ║');
+    console.log('║  4. Edit customer                  ║');
+    console.log('║  5. Update order status            ║');
+    console.log('║  6. Manage customer pricing        ║');
+    console.log('║  7. Exit                           ║');
+    console.log('╚════════════════════════════════════╝\n');
 
-    const choice = await question('Choose an option (1-6): ');
+    const choice = await question('Choose an option (1-7): ');
 
     switch (choice.trim()) {
         case '1':
@@ -220,12 +330,16 @@ async function mainMenu() {
             await mainMenu();
             break;
         case '6':
+            await managePricing();
+            await mainMenu();
+            break;
+        case '7':
             console.log('\nGoodbye.\n');
             rl.close();
             db.close();
             break;
         default:
-            console.log('\n⚠️  Invalid option. Please choose 1-6.\n');
+            console.log('\n⚠️  Invalid option. Please choose 1-7.\n');
             await mainMenu();
     }
 }

@@ -65,6 +65,25 @@ function findProduct(searchTerm) {
 
     return product;
 }
+function getCustomerPrice(customerId, duarutoPartNumber) {
+    // Check if customer has a custom price for this part
+    const customPrice = db.prepare(`
+        SELECT price FROM customer_pricing
+        WHERE customer_id = ? AND durauto_part_number = ?
+    `).get(customerId, duarutoPartNumber);
+
+    if (customPrice) {
+        return customPrice.price.toFixed(2);
+    }
+
+    // Fall back to list price from products table
+    const product = db.prepare(`
+        SELECT price FROM products
+        WHERE durauto_part_number = ?
+    `).get(duarutoPartNumber);
+
+    return product && product.price ? product.price : null;
+}
 
 function generateOrderId() {
     const count = db.prepare('SELECT COUNT(*) as count FROM orders').get();
@@ -187,7 +206,9 @@ async function chat(customerPhone, userMessage) {
         if (cleaned.length > 3) {
             const product = findProduct(cleaned);
             if (product) {
-                productContext += `
+                const customerPrice = getCustomerPrice(customer.customer_id, product.durauto_part_number);
+
+productContext += `
 PRODUCT FOUND:
 - Durauto Part #: ${product.durauto_part_number}
 - Name: ${product.part_name}
@@ -196,7 +217,7 @@ PRODUCT FOUND:
 - Description: ${product.description}
 - Application: ${product.application}
 - Specification: ${product.specification}
-- Price: ${product.price}
+- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}
 - Weight: ${product.weight}
 - Cross References: ${product.cross_references.join(', ')}
 `;
