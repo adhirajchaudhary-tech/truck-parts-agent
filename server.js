@@ -416,6 +416,26 @@ app.get('/invoices/:filename', (req, res) => {
 
 // ─── Admin Routes ─────────────────────────────────────────────────────────────
 
+app.get('/admin/migrate', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    const results = [];
+
+    try {
+        db.exec(`ALTER TABLE products ADD COLUMN photo_url TEXT`);
+        results.push('✅ photo_url column added to products');
+    } catch (err) {
+        if (err.message.includes('duplicate column')) {
+            results.push('ℹ️ photo_url column already exists');
+        } else {
+            results.push(`❌ Error: ${err.message}`);
+        }
+    }
+
+    res.json({ success: true, results });
+});
+
 app.get('/admin/view', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
