@@ -161,6 +161,7 @@ You help retail customers do the following:
 2. View their order history
 3. Reorder from a previous order with option to adjust quantities
 4. Get product specifications
+5. View product photos
 
 Your personality:
 - Friendly, professional, and efficient
@@ -177,6 +178,13 @@ How you handle orders:
   [SAVE_ORDER: partNumber=X, quantity=Y, partName=Z, price=P]
 - For multiple items use one tag per item on separate lines
 - Only include the SAVE_ORDER tag after the customer confirms with yes
+
+How you handle photo requests:
+- When a customer asks to see a photo or image of a product, include this exact tag in your response:
+  [SEND_PHOTO: partNumber=X]
+- Replace X with the exact Durauto Part # of the product
+- Only include this tag if Photo Available is Yes for that product
+- If Photo Available is No, tell the customer no photo is available yet
 
 How you handle product lookups:
 - Use ONLY the product data provided to you
@@ -222,6 +230,7 @@ PRODUCT FOUND:
 - Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}
 - Weight: ${product.weight}
 - Cross References: ${product.cross_references.join(', ')}
+- Photo Available: ${product.photo_url ? 'Yes' : 'No'}
 `;
                 break;
             }
@@ -265,6 +274,7 @@ PRODUCT FOUND:
 
     let vertusReply = response.content[0].text;
 
+    // ─── Handle Order Saving ──────────────────────────────────────────────────
     const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]*)\]/g)];
 
     if (saveOrderMatches.length > 0) {
@@ -298,12 +308,8 @@ PRODUCT FOUND:
                 console.log(`Invoice generated: ${invoiceFilePath}`);
                 console.log(`Invoice URL: ${invoiceUrl}`);
 
-                history.push({
-                    role: "assistant",
-                    content: vertusReply
-                });
-
-                return { reply: vertusReply, invoiceUrl };
+                history.push({ role: "assistant", content: vertusReply });
+                return { reply: vertusReply, invoiceUrl, photoUrl: null };
             } catch (invoiceError) {
                 console.error('Invoice generation error:', invoiceError.message);
             }
@@ -313,12 +319,27 @@ PRODUCT FOUND:
         }
     }
 
-    history.push({
-        role: "assistant",
-        content: vertusReply
-    });
+    // ─── Handle Photo Requests ────────────────────────────────────────────────
+    const photoMatch = vertusReply.match(/\[SEND_PHOTO: partNumber=([^\]]+)\]/);
+    let photoUrl = null;
 
-    return { reply: vertusReply, invoiceUrl: null };
+    if (photoMatch) {
+        const partNumber = photoMatch[1].trim();
+        const productWithPhoto = db.prepare(`
+            SELECT photo_url FROM products 
+            WHERE durauto_part_number = ?
+        `).get(partNumber);
+
+        if (productWithPhoto && productWithPhoto.photo_url) {
+            photoUrl = productWithPhoto.photo_url;
+            console.log(`Photo found for ${partNumber}: ${photoUrl}`);
+        }
+
+        vertusReply = vertusReply.replace(/\[SEND_PHOTO:[^\]]+\]/g, '').trim();
+    }
+
+    history.push({ role: "assistant", content: vertusReply });
+    return { reply: vertusReply, invoiceUrl: null, photoUrl };
 }
 
 // ─── WhatsApp Webhook ─────────────────────────────────────────────────────────
@@ -333,22 +354,14 @@ app.post('/webhook', async (req, res) => {
     const messageSid = req.body.MessageSid;
     const messageStatus = req.body.MessageStatus;
 
-    if (!incomingMessage || !fromNumber) {
-        return res.sendStatus(200);
-    }
-
-    if (messageStatus && !messageSid) {
-        return res.sendStatus(200);
-    }
-
-    if (fromNumber === process.env.TWILIO_WHATSAPP_NUMBER) {
-        return res.sendStatus(200);
-    }
+    if (!incomingMessage || !fromNumber) return res.sendStatus(200);
+    if (messageStatus && !messageSid) return res.sendStatus(200);
+    if (fromNumber === process.env.TWILIO_WHATSAPP_NUMBER) return res.sendStatus(200);
 
     console.log(`Message from ${fromNumber}: ${incomingMessage}`);
 
     try {
-        const { reply, invoiceUrl } = await chat(fromNumber, incomingMessage);
+        const { reply, invoiceUrl, photoUrl } = await chat(fromNumber, incomingMessage);
 
         console.log('--- VERTUS REPLY ---');
         console.log(reply);
@@ -368,6 +381,16 @@ app.post('/webhook', async (req, res) => {
                 mediaUrl: [invoiceUrl]
             });
             console.log(`Invoice sent: ${invoiceUrl}`);
+        }
+
+        if (photoUrl) {
+            await twilioClient.messages.create({
+                from: process.env.TWILIO_WHATSAPP_NUMBER,
+                to: fromNumber,
+                body: '📸 Here is the product photo:',
+                mediaUrl: [photoUrl]
+            });
+            console.log(`Photo sent: ${photoUrl}`);
         }
 
         console.log(`Reply sent to ${fromNumber}`);
@@ -486,6 +509,68 @@ app.get('/admin/import-pricing', async (req, res) => {
         res.json({
             success: true,
             imported: successCount,
+            errors: errorCount,
+            details: results
+        });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/import-photos', async (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const axios = require('axios');
+        const { parse } = require('csv-parse/sync');
+
+        const response = await axios.get(
+            'https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/photos.csv'
+        );
+
+        const records = parse(response.data, {
+            columns: true,
+            skip_empty_lines: true,
+            trim: true
+        });
+
+        let successCount = 0;
+        let errorCount = 0;
+        const results = [];
+
+        for (const record of records) {
+            const partNumber = record['durauto_part_number'] || '';
+            const photoUrl = record['photo_url'] || '';
+
+            if (!partNumber || !photoUrl) {
+                errorCount++;
+                continue;
+            }
+
+            try {
+                const result = db.prepare(`
+                    UPDATE products SET photo_url = ? 
+                    WHERE durauto_part_number = ?
+                `).run(photoUrl, partNumber);
+
+                if (result.changes > 0) {
+                    results.push(`✅ ${partNumber} — photo set`);
+                    successCount++;
+                } else {
+                    results.push(`⚠️ ${partNumber} — part not found`);
+                    errorCount++;
+                }
+            } catch (err) {
+                results.push(`❌ ${partNumber}: ${err.message}`);
+                errorCount++;
+            }
+        }
+
+        res.json({
+            success: true,
+            updated: successCount,
             errors: errorCount,
             details: results
         });
