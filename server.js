@@ -85,6 +85,22 @@ function getCustomerPrice(customerId, durautoPartNumber) {
     return product && product.price ? product.price : null;
 }
 
+function searchByCategory(searchTerm) {
+    const term = searchTerm.trim().toUpperCase();
+
+    const products = db.prepare(`
+        SELECT durauto_part_number, part_name, category, sub_category, price
+        FROM products
+        WHERE UPPER(category) LIKE ?
+        OR UPPER(sub_category) LIKE ?
+        OR UPPER(part_name) LIKE ?
+        OR UPPER(description) LIKE ?
+        ORDER BY category, sub_category, part_name
+    `).all(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+
+    return products;
+}
+
 function generateOrderId() {
     const count = db.prepare('SELECT COUNT(*) as count FROM orders').get();
     const next = 1001 + count.count + 1;
@@ -165,7 +181,7 @@ function saveConversationMessage(phone, role, message) {
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
 const systemPrompt = `
-You are Vertus, the ordering assistant for Durauto Parts LLC — a distributor of heavy-duty truck parts.
+You are Vertus, the ordering assistant for Durauto Parts LLC — a distributor of heavy-duty truck parts based in Houston, TX.
 
 You help retail customers do the following:
 1. Place new orders by part number and quantity
@@ -173,6 +189,7 @@ You help retail customers do the following:
 3. Reorder from a previous order with option to adjust quantities
 4. Get product specifications
 5. View product photos
+6. Browse products by category
 
 Your personality:
 - Friendly, professional, and efficient
@@ -201,6 +218,13 @@ How you handle product lookups:
 - Use ONLY the product data provided to you
 - Present specs in simple plain text — no markdown tables
 
+How you handle category browsing:
+- When a customer asks what products you carry in a category, list them clearly and concisely
+- Show the part number and name for each product
+- Keep the list clean — just part number and name, no specs unless asked
+- After listing, invite them to ask for details on any specific part
+- If they ask what you carry generally, tell them the categories and how many products in each
+
 What you don't do:
 - Never guess product details
 - Never finalize without confirmation
@@ -225,7 +249,64 @@ async function chat(customerPhone, userMessage) {
     }
 
     const history = conversations[customerPhone];
+    const messageLower = userMessage.toLowerCase();
 
+    // ─── Category Browse Detection ────────────────────────────────────────────
+    const browseKeywords = [
+        'brake shoe', 'brake chamber', 'slack adjuster', 'manual slack',
+        'air brake', 'coolant reservoir', 'hub cap', 'air hose',
+        'what do you have', 'what have you got', 'show me all', 'list all',
+        'types of', 'kinds of', 'all your', 'what parts', 'what products',
+        'do you carry', 'do you sell', 'what brake', 'what slack',
+        'how many', 'what kind of'
+    ];
+
+    const categorySearchTerms = [
+        { keyword: 'brake shoe', search: 'brake shoe' },
+        { keyword: 'brake chamber', search: 'brake chamber' },
+        { keyword: 'slack adjuster', search: 'slack adjuster' },
+        { keyword: 'manual slack', search: 'manual slack' },
+        { keyword: 'air hose', search: 'air hose' },
+        { keyword: 'coolant reservoir', search: 'coolant reservoir' },
+        { keyword: 'hub cap', search: 'hub cap' },
+        { keyword: 'air brake', search: 'air brake' },
+        { keyword: 'wheel', search: 'wheel' },
+        { keyword: 'cooling', search: 'cooling' },
+    ];
+
+    let categoryContext = '';
+    const matchedKeyword = browseKeywords.find(kw => messageLower.includes(kw));
+
+    if (matchedKeyword) {
+        const matched = categorySearchTerms.find(c => messageLower.includes(c.keyword));
+
+        if (matched) {
+            const results = searchByCategory(matched.search);
+            if (results.length > 0) {
+                categoryContext = `\nCATEGORY SEARCH RESULTS for "${matched.search}":\n`;
+                results.forEach((p, i) => {
+                    categoryContext += `${i + 1}. ${p.durauto_part_number} — ${p.part_name}\n`;
+                });
+                categoryContext += `\nTotal: ${results.length} products found. Customer can ask for details on any specific part.\n`;
+            }
+        } else {
+            // Generic browse — show category summary
+            const allCategories = db.prepare(`
+                SELECT category, COUNT(*) as count 
+                FROM products 
+                GROUP BY category 
+                ORDER BY category
+            `).all();
+
+            categoryContext = '\nPRODUCT CATALOG SUMMARY:\n';
+            allCategories.forEach(cat => {
+                categoryContext += `- ${cat.category}: ${cat.count} products\n`;
+            });
+            categoryContext += '\nTell the customer what categories you carry and invite them to ask about a specific one.\n';
+        }
+    }
+
+    // ─── Product Lookup ───────────────────────────────────────────────────────
     const words = userMessage.split(/\s+/);
     let productContext = '';
 
@@ -255,7 +336,7 @@ PRODUCT FOUND:
         }
     }
 
-    const messageLower = userMessage.toLowerCase();
+    // ─── Order History ────────────────────────────────────────────────────────
     let orderContext = '';
     if (messageLower.includes('history') ||
         messageLower.includes('last order') ||
@@ -276,7 +357,7 @@ PRODUCT FOUND:
         }
     }
 
-    const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
+    const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${categoryContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
 
     saveConversationMessage(customerPhone, 'customer', userMessage);
 
@@ -385,10 +466,7 @@ app.post('/webhook', async (req, res) => {
     try {
         const result = await chat(fromNumber, incomingMessage);
 
-        // If result is null, customer is paused — don't send any reply
-        if (!result) {
-            return res.sendStatus(200);
-        }
+        if (!result) return res.sendStatus(200);
 
         const { reply, invoiceUrl, photoUrl } = result;
 
@@ -568,8 +646,6 @@ app.get('/admin/dashboard', (req, res) => {
                         '<div class="customer-last">' + (c.last_message || 'No messages yet') + '</div>';
                     list.appendChild(div);
                 });
-
-                // Update pause button if a customer is selected
                 if (selectedPhone) {
                     const current = data.find(c => c.phone === selectedPhone);
                     if (current) updatePauseButton(current.paused);
@@ -582,7 +658,6 @@ app.get('/admin/dashboard', (req, res) => {
         async function selectCustomer(phone, storeName, contactName, paused) {
             selectedPhone = phone;
             selectedPaused = paused;
-
             document.getElementById('chatHeader').innerHTML =
                 '<div class="chat-header-info">' +
                 '<h2>' + (storeName || 'Unknown Store') + '</h2>' +
@@ -591,11 +666,9 @@ app.get('/admin/dashboard', (req, res) => {
                 '<button class="pause-btn" id="pauseBtn" onclick="togglePause()">' +
                 (paused ? '▶ Resume Vertus' : '⏸ Pause Vertus') +
                 '</button>';
-
             document.getElementById('pauseBtn').className = 'pause-btn ' + (paused ? 'paused' : 'active');
             document.getElementById('replyBox').style.display = 'flex';
             document.getElementById('pausedBanner').style.display = paused ? 'block' : 'none';
-
             loadMessages(phone);
             loadCustomers();
         }
@@ -615,7 +688,6 @@ app.get('/admin/dashboard', (req, res) => {
             if (!selectedPhone) return;
             const btn = document.getElementById('pauseBtn');
             btn.disabled = true;
-
             try {
                 const res = await fetch('/admin/api/toggle-pause?secret=' + secret + '&phone=' + encodeURIComponent(selectedPhone), {method: 'POST'});
                 const data = await res.json();
@@ -624,7 +696,6 @@ app.get('/admin/dashboard', (req, res) => {
             } catch (err) {
                 console.error('Error toggling pause:', err);
             }
-
             btn.disabled = false;
         }
 
@@ -633,11 +704,9 @@ app.get('/admin/dashboard', (req, res) => {
             const textarea = document.getElementById('replyText');
             const message = textarea.value.trim();
             if (!message) return;
-
             const btn = document.getElementById('sendBtn');
             btn.disabled = true;
             btn.textContent = 'Sending...';
-
             try {
                 const res = await fetch('/admin/api/send-message', {
                     method: 'POST',
@@ -654,12 +723,10 @@ app.get('/admin/dashboard', (req, res) => {
             } catch (err) {
                 alert('Error sending message');
             }
-
             btn.disabled = false;
             btn.textContent = 'Send';
         }
 
-        // Send on Enter (Shift+Enter for new line)
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' && !e.shiftKey && document.activeElement.id === 'replyText') {
                 e.preventDefault();
@@ -686,7 +753,7 @@ app.get('/admin/dashboard', (req, res) => {
                     const label = labels[msg.role] || msg.role;
                     div.innerHTML =
                         '<div class="message-label">' + label + '</div>' +
-                        '<div class="message-bubble">' + msg.message.replace(/\\n/g, '<br>') + '</div>' +
+                        '<div class="message-bubble">' + msg.message.replace(/\n/g, '<br>') + '</div>' +
                         '<div class="message-time">' + time + '</div>';
                     area.appendChild(div);
                 });
@@ -764,7 +831,6 @@ app.post('/admin/api/toggle-pause', (req, res) => {
 
         const newPaused = customer.paused ? 0 : 1;
         db.prepare('UPDATE customers SET paused = ? WHERE phone = ?').run(newPaused, phone);
-
         console.log(`Customer ${phone} paused: ${newPaused}`);
         res.json({ success: true, paused: newPaused });
     } catch (err) {
@@ -782,10 +848,7 @@ app.post('/admin/api/send-message', async (req, res) => {
             to: `whatsapp:${phone}`,
             body: message
         });
-
-        // Save to conversations as admin message
         saveConversationMessage(phone, 'admin', message);
-
         console.log(`Admin message sent to ${phone}: ${message}`);
         res.json({ success: true });
     } catch (err) {
@@ -830,7 +893,7 @@ app.get('/admin/migrate', (req, res) => {
 
     try {
         db.exec(`ALTER TABLE customers ADD COLUMN paused INTEGER DEFAULT 0`);
-        results.push('✅ paused column added to customers');
+        results.push('✅ paused column added');
     } catch (err) {
         if (err.message.includes('duplicate column')) {
             results.push('ℹ️ paused column already exists');
