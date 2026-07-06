@@ -76,4 +76,16 @@ db.exec(`
 
 console.log('Customer pricing table ready');
 
+db.exec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_phone TEXT,
+        role TEXT,
+        message TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+`);
+
+console.log('Conversations table ready');
+
 db.close();

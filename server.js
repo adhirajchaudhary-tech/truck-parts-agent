@@ -151,6 +151,17 @@ function findOrCreateCustomer(phone) {
     return customer;
 }
 
+function saveConversationMessage(phone, role, message) {
+    try {
+        db.prepare(`
+            INSERT INTO conversations (customer_phone, role, message)
+            VALUES (?, ?, ?)
+        `).run(phone.replace('whatsapp:', ''), role, message);
+    } catch (err) {
+        // conversations table might not exist yet
+    }
+}
+
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
 const systemPrompt = `
@@ -260,6 +271,9 @@ PRODUCT FOUND:
 
     const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
 
+    // Save customer message to database
+    saveConversationMessage(customerPhone, 'customer', userMessage);
+
     history.push({
         role: "user",
         content: userMessage + systemData
@@ -308,6 +322,7 @@ PRODUCT FOUND:
                 console.log(`Invoice generated: ${invoiceFilePath}`);
                 console.log(`Invoice URL: ${invoiceUrl}`);
 
+                saveConversationMessage(customerPhone, 'vertus', vertusReply);
                 history.push({ role: "assistant", content: vertusReply });
                 return { reply: vertusReply, invoiceUrl, photoUrl: null };
             } catch (invoiceError) {
@@ -338,6 +353,7 @@ PRODUCT FOUND:
         vertusReply = vertusReply.replace(/\[SEND_PHOTO:[^\]]+\]/g, '').trim();
     }
 
+    saveConversationMessage(customerPhone, 'vertus', vertusReply);
     history.push({ role: "assistant", content: vertusReply });
     return { reply: vertusReply, invoiceUrl: null, photoUrl };
 }
@@ -414,6 +430,204 @@ app.get('/invoices/:filename', (req, res) => {
     }
 });
 
+// ─── Admin Dashboard ──────────────────────────────────────────────────────────
+
+app.get('/admin/dashboard', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vertus Admin Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; }
+        .header { background: #1a5276; color: white; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .status { font-size: 12px; background: #27ae60; padding: 4px 10px; border-radius: 12px; }
+        .container { display: flex; height: calc(100vh - 56px); }
+        .sidebar { width: 320px; background: white; border-right: 1px solid #e0e0e0; overflow-y: auto; flex-shrink: 0; }
+        .sidebar-header { padding: 16px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #333; font-size: 14px; }
+        .customer-item { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; transition: background 0.1s; }
+        .customer-item:hover { background: #f5f5f5; }
+        .customer-item.active { background: #ebf3fb; border-left: 3px solid #1a5276; }
+        .customer-name { font-weight: 600; font-size: 14px; color: #222; }
+        .customer-phone { font-size: 12px; color: #888; margin-top: 2px; }
+        .customer-last { font-size: 12px; color: #aaa; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+        .customer-time { font-size: 11px; color: #bbb; float: right; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .chat-header { padding: 16px 20px; background: white; border-bottom: 1px solid #e0e0e0; }
+        .chat-header h2 { font-size: 16px; font-weight: 600; color: #222; }
+        .chat-header p { font-size: 12px; color: #888; margin-top: 2px; }
+        .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+        .message { max-width: 70%; }
+        .message.customer { align-self: flex-end; }
+        .message.vertus { align-self: flex-start; }
+        .message-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; }
+        .message.customer .message-bubble { background: #dcf8c6; color: #222; border-bottom-right-radius: 4px; }
+        .message.vertus .message-bubble { background: white; color: #222; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+        .message-time { font-size: 11px; color: #aaa; margin-top: 4px; text-align: right; }
+        .message.vertus .message-time { text-align: left; }
+        .message-label { font-size: 11px; color: #888; margin-bottom: 3px; }
+        .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 14px; }
+        .refresh-bar { padding: 8px 16px; background: #f8f8f8; border-top: 1px solid #e0e0e0; font-size: 11px; color: #aaa; text-align: center; }
+        .badge { background: #e74c3c; color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; margin-left: 6px; }
+        .no-customers { padding: 20px; text-align: center; color: #aaa; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚛 Vertus Admin Dashboard</h1>
+        <span class="status">● Live</span>
+    </div>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">Customers <span id="customerCount"></span></div>
+            <div id="customerList"></div>
+        </div>
+        <div class="chat-area">
+            <div class="chat-header" id="chatHeader">
+                <h2>Select a customer</h2>
+                <p>Click a customer on the left to view their conversation</p>
+            </div>
+            <div class="messages" id="messageArea">
+                <div class="empty-state">👈 Select a customer to view messages</div>
+            </div>
+            <div class="refresh-bar">Auto-refreshes every 10 seconds</div>
+        </div>
+    </div>
+    <script>
+        let selectedPhone = null;
+        const secret = new URLSearchParams(window.location.search).get('secret');
+
+        async function loadCustomers() {
+            try {
+                const res = await fetch('/admin/api/customers?secret=' + secret);
+                const data = await res.json();
+                document.getElementById('customerCount').innerHTML =
+                    '<span class="badge">' + data.length + '</span>';
+                const list = document.getElementById('customerList');
+                if (data.length === 0) {
+                    list.innerHTML = '<div class="no-customers">No customers yet.<br>Messages will appear here when customers start chatting.</div>';
+                    return;
+                }
+                list.innerHTML = '';
+                data.forEach(c => {
+                    const div = document.createElement('div');
+                    div.className = 'customer-item' + (selectedPhone === c.phone ? ' active' : '');
+                    div.onclick = () => selectCustomer(c.phone, c.store_name, c.contact_name);
+                    const time = c.last_message_time ?
+                        new Date(c.last_message_time + ' UTC').toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+                    div.innerHTML =
+                        '<span class="customer-time">' + time + '</span>' +
+                        '<div class="customer-name">' + (c.store_name || 'Unknown Store') + '</div>' +
+                        '<div class="customer-phone">' + c.phone + '</div>' +
+                        '<div class="customer-last">' + (c.last_message || 'No messages yet') + '</div>';
+                    list.appendChild(div);
+                });
+            } catch (err) {
+                console.error('Error loading customers:', err);
+            }
+        }
+
+        async function selectCustomer(phone, storeName, contactName) {
+            selectedPhone = phone;
+            document.getElementById('chatHeader').innerHTML =
+                '<h2>' + (storeName || 'Unknown Store') + '</h2>' +
+                '<p>' + (contactName || '') + ' &bull; ' + phone + '</p>';
+            loadMessages(phone);
+            loadCustomers();
+        }
+
+        async function loadMessages(phone) {
+            try {
+                const res = await fetch('/admin/api/messages?secret=' + secret + '&phone=' + encodeURIComponent(phone));
+                const data = await res.json();
+                const area = document.getElementById('messageArea');
+                area.innerHTML = '';
+                if (data.length === 0) {
+                    area.innerHTML = '<div class="empty-state">No messages yet</div>';
+                    return;
+                }
+                data.forEach(msg => {
+                    const div = document.createElement('div');
+                    div.className = 'message ' + msg.role;
+                    const time = new Date(msg.created_at + ' UTC').toLocaleTimeString([],
+                        {hour: '2-digit', minute:'2-digit'});
+                    const label = msg.role === 'customer' ? '👤 Customer' : '🤖 Vertus';
+                    div.innerHTML =
+                        '<div class="message-label">' + label + '</div>' +
+                        '<div class="message-bubble">' + msg.message.replace(/\\n/g, '<br>') + '</div>' +
+                        '<div class="message-time">' + time + '</div>';
+                    area.appendChild(div);
+                });
+                area.scrollTop = area.scrollHeight;
+            } catch (err) {
+                console.error('Error loading messages:', err);
+            }
+        }
+
+        setInterval(() => {
+            loadCustomers();
+            if (selectedPhone) loadMessages(selectedPhone);
+        }, 10000);
+
+        loadCustomers();
+    </script>
+</body>
+</html>`;
+
+    res.send(html);
+});
+
+app.get('/admin/api/customers', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const customers = db.prepare(`
+            SELECT 
+                c.customer_id,
+                c.store_name,
+                c.contact_name,
+                c.phone,
+                conv.message as last_message,
+                conv.created_at as last_message_time
+            FROM customers c
+            LEFT JOIN conversations conv ON c.phone = conv.customer_phone
+                AND conv.id = (
+                    SELECT MAX(id) FROM conversations 
+                    WHERE customer_phone = c.phone
+                )
+            ORDER BY conv.created_at DESC
+        `).all();
+        res.json(customers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/api/messages', (req, res) => {
+    const { secret, phone } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const messages = db.prepare(`
+            SELECT role, message, created_at
+            FROM conversations
+            WHERE customer_phone = ?
+            ORDER BY created_at ASC
+        `).all(phone);
+        res.json(messages);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ─── Admin Routes ─────────────────────────────────────────────────────────────
 
 app.get('/admin/migrate', (req, res) => {
@@ -424,13 +638,28 @@ app.get('/admin/migrate', (req, res) => {
 
     try {
         db.exec(`ALTER TABLE products ADD COLUMN photo_url TEXT`);
-        results.push('✅ photo_url column added to products');
+        results.push('✅ photo_url column added');
     } catch (err) {
         if (err.message.includes('duplicate column')) {
-            results.push('ℹ️ photo_url column already exists');
+            results.push('ℹ️ photo_url already exists');
         } else {
-            results.push(`❌ Error: ${err.message}`);
+            results.push(`❌ ${err.message}`);
         }
+    }
+
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_phone TEXT,
+                role TEXT,
+                message TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        `);
+        results.push('✅ conversations table created');
+    } catch (err) {
+        results.push(`❌ ${err.message}`);
     }
 
     res.json({ success: true, results });
@@ -526,12 +755,7 @@ app.get('/admin/import-pricing', async (req, res) => {
             }
         }
 
-        res.json({
-            success: true,
-            imported: successCount,
-            errors: errorCount,
-            details: results
-        });
+        res.json({ success: true, imported: successCount, errors: errorCount, details: results });
 
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -588,12 +812,7 @@ app.get('/admin/import-photos', async (req, res) => {
             }
         }
 
-        res.json({
-            success: true,
-            updated: successCount,
-            errors: errorCount,
-            details: results
-        });
+        res.json({ success: true, updated: successCount, errors: errorCount, details: results });
 
     } catch (err) {
         res.status(500).json({ error: err.message });
