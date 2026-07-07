@@ -1271,6 +1271,17 @@ app.get('/admin/migrate', (req, res) => {
     res.json({ success: true, results });
 });
 
+app.get('/admin/approve-customer', (req, res) => {
+    const { secret, customer_id } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        db.prepare(`UPDATE customers SET status = 'approved' WHERE customer_id = ?`).run(customer_id);
+        res.json({ success: true, message: `Customer ${customer_id} approved` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 app.get('/admin/view', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
