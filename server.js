@@ -626,6 +626,30 @@ app.get('/admin/import-photos', async (req, res) => {
 });
 
 app.get('/', (req, res) => { res.send('Vertus is running.'); });
+app.get('/admin/update-customer', (req, res) => {
+    const { secret, customer_id, store_name, contact_name, email, address } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    if (!customer_id) return res.send('Missing customer_id');
+
+    try {
+        const updates = [];
+        const values = [];
+
+        if (store_name) { updates.push('store_name = ?'); values.push(store_name); }
+        if (contact_name) { updates.push('contact_name = ?'); values.push(contact_name); }
+        if (email) { updates.push('email = ?'); values.push(email); }
+        if (address) { updates.push('address = ?'); values.push(address); }
+
+        if (updates.length === 0) return res.send('No fields to update');
+
+        values.push(customer_id);
+        db.prepare(`UPDATE customers SET ${updates.join(', ')} WHERE customer_id = ?`).run(...values);
+
+        res.json({ success: true, message: `Customer ${customer_id} updated` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
