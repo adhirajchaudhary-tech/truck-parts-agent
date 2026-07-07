@@ -656,11 +656,42 @@ async function loadCustomers() {
         approved.forEach(c => {
             const div = document.createElement('div');
             div.className = 'customer-item' + (selPhone === c.phone ? ' active' : '');
-            div.onclick = () => selectCust(c.phone, c.store_name, c.contact_name, c.paused);
+            div.dataset.phone = c.phone;
+            div.dataset.store = c.store_name || 'Unknown';
+            div.dataset.contact = c.contact_name || '';
+            div.dataset.paused = c.paused;
+            div.onclick = function() {
+                selectCust(this.dataset.phone, this.dataset.store, this.dataset.contact, parseInt(this.dataset.paused));
+            };
             const time = c.last_message_time ? new Date(c.last_message_time + ' UTC').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
-            const pausedBadge = c.paused ? '<span class="badge-paused">PAUSED</span>' : '';
             const preview = (c.last_message || 'No messages yet').replace(/\n/g,' ').substring(0, 50);
-            div.innerHTML = '<span class="customer-time">' + esc(time) + '</span><div class="customer-name">' + esc(c.store_name || 'Unknown') + pausedBadge + '</div><div class="customer-phone">' + esc(c.phone) + '</div><div class="customer-preview">' + esc(preview) + '</div>';
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'customer-time';
+            timeSpan.textContent = time;
+
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'customer-name';
+            nameDiv.textContent = c.store_name || 'Unknown';
+            if (c.paused) {
+                const badge = document.createElement('span');
+                badge.className = 'badge-paused';
+                badge.textContent = 'PAUSED';
+                nameDiv.appendChild(badge);
+            }
+
+            const phoneDiv = document.createElement('div');
+            phoneDiv.className = 'customer-phone';
+            phoneDiv.textContent = c.phone;
+
+            const previewDiv = document.createElement('div');
+            previewDiv.className = 'customer-preview';
+            previewDiv.textContent = preview;
+
+            div.appendChild(timeSpan);
+            div.appendChild(nameDiv);
+            div.appendChild(phoneDiv);
+            div.appendChild(previewDiv);
             list.appendChild(div);
         });
         if (selPhone) {
