@@ -58,6 +58,45 @@ function updateOnboardingStep(phone, field, value, nextStep) {
     db.prepare(`UPDATE onboarding SET ${field} = ?, step = ? WHERE customer_phone = ?`).run(value, nextStep, phone);
 }
 
+function cleanAnswer(field, rawAnswer) {
+    let answer = rawAnswer.trim();
+
+    if (field === 'store_name') {
+        answer = answer
+            .replace(/^my store( name)? is\s*/i, '')
+            .replace(/^the store( name)? is\s*/i, '')
+            .replace(/^it'?s?\s+(called\s+)?/i, '')
+            .replace(/^we are\s*/i, '')
+            .replace(/^our (store|business|shop)( name)? is\s*/i, '')
+            .replace(/^(store|business|shop) name[:\s]+/i, '')
+            .replace(/^name[:\s]+/i, '')
+            .trim();
+    }
+
+    if (field === 'contact_name') {
+        answer = answer
+            .replace(/^my name is\s*/i, '')
+            .replace(/^the contact is\s*/i, '')
+            .replace(/^contact[:\s]+/i, '')
+            .replace(/^i'?m\s*/i, '')
+            .replace(/^it'?s?\s*/i, '')
+            .trim();
+    }
+
+    if (field === 'email') {
+        const emailMatch = answer.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+        if (emailMatch) answer = emailMatch[0];
+    }
+
+    if (field === 'business_phone') {
+        // Extract just the phone number if they write a sentence
+        const phoneMatch = answer.match(/[\+\d\s\-\(\)]{7,}/);
+        if (phoneMatch) answer = phoneMatch[0].trim();
+    }
+
+    return answer;
+}
+
 async function handleOnboarding(phone, message) {
     let onboarding = getOnboarding(phone);
 
@@ -79,7 +118,8 @@ async function handleOnboarding(phone, message) {
     }
 
     const currentField = ONBOARDING_STEPS[currentStep].field;
-    const answer = message.trim().toLowerCase() === 'skip' ? '' : message.trim();
+    const rawAnswer = message.trim().toLowerCase() === 'skip' ? '' : message.trim();
+    const answer = rawAnswer ? cleanAnswer(currentField, rawAnswer) : '';
     const nextStep = currentStep + 1;
 
     updateOnboardingStep(phone, currentField, answer, nextStep);
@@ -577,6 +617,24 @@ app.get('/admin/approve-customer', (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/admin/update-customer', (req, res) => {
+    const { secret, customer_id, store_name, contact_name, email, address } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    if (!customer_id) return res.send('Missing customer_id');
+    try {
+        const updates = [];
+        const values = [];
+        if (store_name) { updates.push('store_name = ?'); values.push(store_name); }
+        if (contact_name) { updates.push('contact_name = ?'); values.push(contact_name); }
+        if (email) { updates.push('email = ?'); values.push(email); }
+        if (address) { updates.push('address = ?'); values.push(address); }
+        if (updates.length === 0) return res.send('No fields to update');
+        values.push(customer_id);
+        db.prepare(`UPDATE customers SET ${updates.join(', ')} WHERE customer_id = ?`).run(...values);
+        res.json({ success: true, message: `Customer ${customer_id} updated` });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/admin/import-pricing', async (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
@@ -626,30 +684,6 @@ app.get('/admin/import-photos', async (req, res) => {
 });
 
 app.get('/', (req, res) => { res.send('Vertus is running.'); });
-app.get('/admin/update-customer', (req, res) => {
-    const { secret, customer_id, store_name, contact_name, email, address } = req.query;
-    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
-    if (!customer_id) return res.send('Missing customer_id');
-
-    try {
-        const updates = [];
-        const values = [];
-
-        if (store_name) { updates.push('store_name = ?'); values.push(store_name); }
-        if (contact_name) { updates.push('contact_name = ?'); values.push(contact_name); }
-        if (email) { updates.push('email = ?'); values.push(email); }
-        if (address) { updates.push('address = ?'); values.push(address); }
-
-        if (updates.length === 0) return res.send('No fields to update');
-
-        values.push(customer_id);
-        db.prepare(`UPDATE customers SET ${updates.join(', ')} WHERE customer_id = ?`).run(...values);
-
-        res.json({ success: true, message: `Customer ${customer_id} updated` });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
