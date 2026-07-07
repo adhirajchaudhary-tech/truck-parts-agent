@@ -518,8 +518,8 @@ app.get('/invoices/:filename', (req, res) => {
 app.get('/admin/dashboard', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
-
-    const html = `<!DOCTYPE html>
+    res.sendFile(path.resolve('dashboard.html'));
+});
 <html lang="en">
 <head>
     <meta charset="UTF-8">

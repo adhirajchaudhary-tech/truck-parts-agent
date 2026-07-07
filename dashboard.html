@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vertus Admin Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; height: 100vh; overflow: hidden; }
+        .header { background: #1a5276; color: white; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .status { font-size: 12px; background: #27ae60; padding: 4px 10px; border-radius: 12px; }
+        .tabs { display: flex; background: #154360; padding: 0 16px; }
+        .tab { padding: 10px 20px; color: rgba(255,255,255,0.6); cursor: pointer; font-size: 13px; font-weight: 500; border-bottom: 3px solid transparent; transition: all 0.2s; }
+        .tab:hover { color: white; }
+        .tab.active { color: white; border-bottom-color: #3498db; }
+        .tab-content { display: none; height: calc(100vh - 88px); }
+        .tab-content.active { display: flex; }
+        .sidebar { width: 300px; background: white; border-right: 1px solid #e0e0e0; overflow-y: auto; flex-shrink: 0; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 14px 16px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #333; font-size: 13px; flex-shrink: 0; }
+        .customer-item { padding: 12px 16px; border-bottom: 1px solid #f5f5f5; cursor: pointer; }
+        .customer-item:hover { background: #f8f8f8; }
+        .customer-item.active { background: #ebf3fb; border-left: 3px solid #1a5276; }
+        .customer-name { font-weight: 600; font-size: 13px; color: #222; }
+        .customer-phone { font-size: 11px; color: #999; margin-top: 2px; }
+        .customer-preview { font-size: 11px; color: #bbb; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .customer-time { font-size: 10px; color: #ccc; float: right; }
+        .badge-paused { font-size: 9px; background: #e74c3c; color: white; padding: 1px 5px; border-radius: 8px; margin-left: 4px; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .chat-header { padding: 12px 20px; background: white; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+        .chat-header-info h2 { font-size: 15px; font-weight: 600; color: #222; }
+        .chat-header-info p { font-size: 11px; color: #999; margin-top: 2px; }
+        .pause-btn { padding: 7px 14px; border: none; border-radius: 7px; cursor: pointer; font-size: 12px; font-weight: 600; }
+        .pause-btn.active { background: #27ae60; color: white; }
+        .pause-btn.paused { background: #e74c3c; color: white; }
+        .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+        .message { max-width: 72%; }
+        .message.customer { align-self: flex-end; }
+        .message.vertus { align-self: flex-start; }
+        .message.admin { align-self: flex-end; }
+        .bubble { padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; }
+        .message.customer .bubble { background: #dcf8c6; color: #222; border-bottom-right-radius: 3px; }
+        .message.vertus .bubble { background: white; color: #222; border-bottom-left-radius: 3px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+        .message.admin .bubble { background: #3498db; color: white; border-bottom-right-radius: 3px; }
+        .msg-meta { font-size: 10px; color: #bbb; margin-top: 3px; }
+        .message.customer .msg-meta, .message.admin .msg-meta { text-align: right; }
+        .msg-label { font-size: 10px; color: #aaa; margin-bottom: 2px; }
+        .message.admin .msg-label { text-align: right; }
+        .paused-banner { background: #fdf2f2; border-top: 1px solid #f5c6cb; padding: 7px 16px; font-size: 12px; color: #e74c3c; text-align: center; flex-shrink: 0; }
+        .reply-box { padding: 10px 14px; background: white; border-top: 1px solid #e0e0e0; display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; }
+        .reply-box textarea { flex: 1; padding: 9px 14px; border: 1px solid #ddd; border-radius: 20px; font-size: 13px; resize: none; outline: none; font-family: inherit; }
+        .reply-box textarea:focus { border-color: #1a5276; }
+        .send-btn { padding: 9px 18px; background: #1a5276; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }
+        .send-btn:disabled { opacity: 0.5; }
+        .refresh-bar { padding: 5px; background: #f8f8f8; border-top: 1px solid #eee; font-size: 10px; color: #ccc; text-align: center; flex-shrink: 0; }
+        .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: #bbb; font-size: 13px; }
+        .cnt-badge { background: #e74c3c; color: white; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-left: 5px; }
+        .cnt-pending { background: #f39c12; color: white; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-left: 5px; }
+        .pending-area { flex: 1; overflow-y: auto; padding: 20px; background: #f0f2f5; }
+        .pending-card { background: white; border-radius: 10px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .pending-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; color: #222; }
+        .pf { display: flex; margin-bottom: 7px; font-size: 13px; }
+        .pl { color: #999; width: 130px; flex-shrink: 0; }
+        .pv { color: #222; font-weight: 500; }
+        .pending-actions { display: flex; gap: 10px; margin-top: 14px; }
+        .approve-btn { padding: 9px 22px; background: #27ae60; color: white; border: none; border-radius: 7px; cursor: pointer; font-size: 13px; font-weight: 600; }
+        .reject-btn { padding: 9px 22px; background: #e74c3c; color: white; border: none; border-radius: 7px; cursor: pointer; font-size: 13px; font-weight: 600; }
+        .approve-btn:disabled, .reject-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .no-pending { text-align: center; color: #bbb; padding: 60px 20px; font-size: 13px; }
+        .no-customers { padding: 16px; text-align: center; color: #bbb; font-size: 12px; }
+    </style>
+</head>
+<body>
+<div class="header">
+    <h1>🚛 Vertus Admin Dashboard</h1>
+    <span class="status">● Live</span>
+</div>
+<div class="tabs">
+    <div class="tab active" id="tab-conv" onclick="switchTab('conv')">Conversations <span id="convBadge"></span></div>
+    <div class="tab" id="tab-pend" onclick="switchTab('pend')">Pending Approvals <span id="pendBadge"></span></div>
+</div>
+
+<div class="tab-content active" id="content-conv">
+    <div class="sidebar">
+        <div class="sidebar-header">Customers <span id="custCount"></span></div>
+        <div id="custList"></div>
+    </div>
+    <div class="chat-area">
+        <div class="chat-header" id="chatHeader">
+            <div class="chat-header-info"><h2>Select a customer</h2><p>Click a customer to view their conversation</p></div>
+        </div>
+        <div class="messages" id="msgArea"><div class="empty-state">👈 Select a customer</div></div>
+        <div class="paused-banner" id="pausedBanner" style="display:none">🔴 Vertus is paused — you are in manual mode</div>
+        <div class="reply-box" id="replyBox" style="display:none">
+            <textarea id="replyText" placeholder="Type a message to send directly to customer..." rows="1"></textarea>
+            <button class="send-btn" id="sendBtn" onclick="sendMsg()">Send</button>
+        </div>
+        <div class="refresh-bar">Auto-refreshes every 10 seconds</div>
+    </div>
+</div>
+
+<div class="tab-content" id="content-pend">
+    <div class="pending-area" id="pendingArea"><div class="no-pending">Loading...</div></div>
+</div>
+
+<script>
+const secret = new URLSearchParams(window.location.search).get('secret');
+let selPhone = null;
+
+function switchTab(t) {
+    document.getElementById('tab-conv').classList.toggle('active', t === 'conv');
+    document.getElementById('tab-pend').classList.toggle('active', t === 'pend');
+    document.getElementById('content-conv').classList.toggle('active', t === 'conv');
+    document.getElementById('content-pend').classList.toggle('active', t === 'pend');
+    if (t === 'pend') loadPending();
+}
+
+async function loadCustomers() {
+    try {
+        const r = await fetch('/admin/api/customers?secret=' + secret);
+        const data = await r.json();
+        const approved = data.filter(c => c.status === 'approved');
+        document.getElementById('custCount').innerHTML = '<span class="cnt-badge">' + approved.length + '</span>';
+        document.getElementById('convBadge').innerHTML = approved.length > 0 ? '<span class="cnt-badge">' + approved.length + '</span>' : '';
+        const list = document.getElementById('custList');
+        if (approved.length === 0) {
+            list.innerHTML = '<div class="no-customers">No approved customers yet.</div>';
+            return;
+        }
+        list.innerHTML = '';
+        approved.forEach(c => {
+            const div = document.createElement('div');
+            div.className = 'customer-item' + (selPhone === c.phone ? ' active' : '');
+            div.dataset.phone = c.phone;
+            div.dataset.store = c.store_name || 'Unknown';
+            div.dataset.contact = c.contact_name || '';
+            div.dataset.paused = c.paused;
+            div.onclick = function() {
+                selectCust(this.dataset.phone, this.dataset.store, this.dataset.contact, parseInt(this.dataset.paused));
+            };
+            const time = c.last_message_time ? new Date(c.last_message_time + ' UTC').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+            const preview = (c.last_message || 'No messages yet').replace(/\n/g,' ').substring(0, 50);
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'customer-time';
+            timeSpan.textContent = time;
+
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'customer-name';
+            nameDiv.textContent = c.store_name || 'Unknown';
+            if (c.paused) {
+                const badge = document.createElement('span');
+                badge.className = 'badge-paused';
+                badge.textContent = 'PAUSED';
+                nameDiv.appendChild(badge);
+            }
+
+            const phoneDiv = document.createElement('div');
+            phoneDiv.className = 'customer-phone';
+            phoneDiv.textContent = c.phone;
+
+            const previewDiv = document.createElement('div');
+            previewDiv.className = 'customer-preview';
+            previewDiv.textContent = preview;
+
+            div.appendChild(timeSpan);
+            div.appendChild(nameDiv);
+            div.appendChild(phoneDiv);
+            div.appendChild(previewDiv);
+            list.appendChild(div);
+        });
+        if (selPhone) {
+            const cur = approved.find(c => c.phone === selPhone);
+            if (cur) updatePauseBtn(cur.paused);
+        }
+    } catch(e) { console.error(e); }
+}
+
+async function loadPending() {
+    try {
+        const r = await fetch('/admin/api/pending?secret=' + secret);
+        const data = await r.json();
+        document.getElementById('pendBadge').innerHTML = data.length > 0 ? '<span class="cnt-pending">' + data.length + '</span>' : '';
+        const area = document.getElementById('pendingArea');
+        if (data.length === 0) { area.innerHTML = '<div class="no-pending">✅ No pending applications right now.</div>'; return; }
+        area.innerHTML = '';
+        data.forEach(app => {
+            const card = document.createElement('div');
+            card.className = 'pending-card';
+
+            const fields = [
+                ['📍 Address', app.address],
+                ['🏙️ City/State', app.city_state],
+                ['📧 Email', app.email],
+                ['👤 Contact', app.contact_name],
+                ['💼 Designation', app.designation],
+                ['📞 Business Phone', app.business_phone],
+                ['📱 WhatsApp', app.customer_phone],
+                ['📅 Applied', new Date(app.created_at + ' UTC').toLocaleDateString()],
+            ];
+            if (app.referral) fields.push(['🔗 Referral', app.referral]);
+
+            const h3 = document.createElement('h3');
+            h3.textContent = app.store_name || 'Unknown Store';
+            card.appendChild(h3);
+
+            fields.forEach(([label, value]) => {
+                const row = document.createElement('div');
+                row.className = 'pf';
+                const l = document.createElement('span');
+                l.className = 'pl';
+                l.textContent = label;
+                const v = document.createElement('span');
+                v.className = 'pv';
+                v.textContent = value || '—';
+                row.appendChild(l);
+                row.appendChild(v);
+                card.appendChild(row);
+            });
+
+            const actions = document.createElement('div');
+            actions.className = 'pending-actions';
+
+            const approveBtn = document.createElement('button');
+            approveBtn.className = 'approve-btn';
+            approveBtn.textContent = '✅ Approve';
+            approveBtn.dataset.phone = app.customer_phone;
+            approveBtn.onclick = function() { approveCust(this.dataset.phone, this); };
+
+            const rejectBtn = document.createElement('button');
+            rejectBtn.className = 'reject-btn';
+            rejectBtn.textContent = '❌ Reject';
+            rejectBtn.dataset.phone = app.customer_phone;
+            rejectBtn.onclick = function() { rejectCust(this.dataset.phone, this); };
+
+            actions.appendChild(approveBtn);
+            actions.appendChild(rejectBtn);
+            card.appendChild(actions);
+            area.appendChild(card);
+        });
+    } catch(e) { console.error(e); }
+}
+
+async function approveCust(phone, btn) {
+    btn.disabled = true; btn.textContent = 'Approving...';
+    try {
+        const r = await fetch('/admin/api/approve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({secret, phone}) });
+        const d = await r.json();
+        if (d.success) { loadPending(); loadCustomers(); }
+        else { alert('Error: ' + (d.error || 'Unknown')); btn.disabled = false; btn.textContent = '✅ Approve'; }
+    } catch(e) { alert('Error'); btn.disabled = false; btn.textContent = '✅ Approve'; }
+}
+
+async function rejectCust(phone, btn) {
+    if (!confirm('Reject this application?')) return;
+    btn.disabled = true; btn.textContent = 'Rejecting...';
+    try {
+        const r = await fetch('/admin/api/reject', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({secret, phone}) });
+        const d = await r.json();
+        if (d.success) loadPending();
+        else { alert('Error: ' + (d.error || 'Unknown')); btn.disabled = false; btn.textContent = '❌ Reject'; }
+    } catch(e) { alert('Error'); btn.disabled = false; btn.textContent = '❌ Reject'; }
+}
+
+function selectCust(phone, storeName, contactName, paused) {
+    selPhone = phone;
+    const header = document.getElementById('chatHeader');
+    header.innerHTML = '';
+
+    const info = document.createElement('div');
+    info.className = 'chat-header-info';
+    const h2 = document.createElement('h2');
+    h2.textContent = storeName || 'Unknown';
+    const p = document.createElement('p');
+    p.textContent = (contactName || '') + ' • ' + phone;
+    info.appendChild(h2);
+    info.appendChild(p);
+
+    const btn = document.createElement('button');
+    btn.id = 'pauseBtn';
+    btn.className = 'pause-btn ' + (paused ? 'paused' : 'active');
+    btn.textContent = paused ? '▶ Resume Vertus' : '⏸ Pause Vertus';
+    btn.onclick = togglePause;
+
+    header.appendChild(info);
+    header.appendChild(btn);
+
+    document.getElementById('replyBox').style.display = 'flex';
+    document.getElementById('pausedBanner').style.display = paused ? 'block' : 'none';
+    loadMsgs(phone);
+    loadCustomers();
+}
+
+function updatePauseBtn(paused) {
+    const btn = document.getElementById('pauseBtn');
+    if (!btn) return;
+    btn.textContent = paused ? '▶ Resume Vertus' : '⏸ Pause Vertus';
+    btn.className = 'pause-btn ' + (paused ? 'paused' : 'active');
+    const banner = document.getElementById('pausedBanner');
+    if (banner) banner.style.display = paused ? 'block' : 'none';
+}
+
+async function togglePause() {
+    if (!selPhone) return;
+    const btn = document.getElementById('pauseBtn');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetch('/admin/api/toggle-pause?secret=' + secret + '&phone=' + encodeURIComponent(selPhone), {method:'POST'});
+        const d = await r.json();
+        updatePauseBtn(d.paused);
+        loadCustomers();
+    } catch(e) { console.error(e); }
+    if (btn) btn.disabled = false;
+}
+
+async function sendMsg() {
+    if (!selPhone) return;
+    const ta = document.getElementById('replyText');
+    const msg = ta.value.trim();
+    if (!msg) return;
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true; btn.textContent = 'Sending...';
+    try {
+        const r = await fetch('/admin/api/send-message', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({secret, phone: selPhone, message: msg}) });
+        const d = await r.json();
+        if (d.success) { ta.value = ''; loadMsgs(selPhone); }
+        else alert('Failed: ' + (d.error || 'Unknown'));
+    } catch(e) { alert('Error sending'); }
+    btn.disabled = false; btn.textContent = 'Send';
+}
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && document.activeElement.id === 'replyText') {
+        e.preventDefault(); sendMsg();
+    }
+});
+
+async function loadMsgs(phone) {
+    try {
+        const r = await fetch('/admin/api/messages?secret=' + secret + '&phone=' + encodeURIComponent(phone));
+        const data = await r.json();
+        const area = document.getElementById('msgArea');
+        area.innerHTML = '';
+        if (data.length === 0) { area.innerHTML = '<div class="empty-state">No messages yet</div>'; return; }
+        data.forEach(msg => {
+            const div = document.createElement('div');
+            div.className = 'message ' + msg.role;
+            const time = new Date(msg.created_at + ' UTC').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+            const labels = {customer:'👤 Customer', vertus:'🤖 Vertus', admin:'👨‍💼 You'};
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'msg-label';
+            labelDiv.textContent = labels[msg.role] || msg.role;
+
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble';
+            bubble.textContent = msg.message;
+
+            const meta = document.createElement('div');
+            meta.className = 'msg-meta';
+            meta.textContent = time;
+
+            div.appendChild(labelDiv);
+            div.appendChild(bubble);
+            div.appendChild(meta);
+            area.appendChild(div);
+        });
+        area.scrollTop = area.scrollHeight;
+    } catch(e) { console.error(e); }
+}
+
+setInterval(() => { loadCustomers(); if (selPhone) loadMsgs(selPhone); }, 10000);
+loadCustomers();
+</script>
+</body>
+</html>
