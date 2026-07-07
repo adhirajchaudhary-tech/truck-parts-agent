@@ -1080,7 +1080,7 @@ app.get('/admin/api/customers', (req, res) => {
                     SELECT MAX(id) FROM conversations 
                     WHERE customer_phone = c.phone
                 )
-            ORDER BY conv.created_at DESC
+            ORDER BY COALESCE(conv.created_at, c.created_at) DESC
         `).all();
         res.json(customers);
     } catch (err) {
