@@ -25,6 +25,133 @@ const twilioClient = twilio(
 
 const conversations = {};
 
+// ─── Send WhatsApp Message ────────────────────────────────────────────────────
+
+async function sendMessage(to, body) {
+    const toNumber = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+    await twilioClient.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: toNumber,
+        body
+    });
+}
+
+// ─── Onboarding Flow ──────────────────────────────────────────────────────────
+
+const ONBOARDING_STEPS = [
+    { field: 'store_name',      question: "What's the name of your store or business?" },
+    { field: 'address',         question: "What's your full street address?" },
+    { field: 'city_state',      question: "What city and state are you in?" },
+    { field: 'email',           question: "What's the best email address for your account?" },
+    { field: 'contact_name',    question: "What's the name of the main contact person?" },
+    { field: 'designation',     question: "What's their role or designation? (e.g. Owner, Manager, Purchasing Agent)" },
+    { field: 'business_phone',  question: "What's your business phone number?" },
+    { field: 'referral',        question: "Last one — how did you hear about Durauto Parts? (press Skip to skip)" },
+];
+
+function getOnboarding(phone) {
+    return db.prepare(`SELECT * FROM onboarding WHERE customer_phone = ?`).get(phone);
+}
+
+function createOnboarding(phone) {
+    try {
+        db.prepare(`INSERT INTO onboarding (customer_phone, step) VALUES (?, 0)`).run(phone);
+    } catch (err) {
+        // already exists
+    }
+    return getOnboarding(phone);
+}
+
+function updateOnboardingStep(phone, field, value, nextStep) {
+    db.prepare(`UPDATE onboarding SET ${field} = ?, step = ? WHERE customer_phone = ?`)
+        .run(value, nextStep, phone);
+}
+
+async function handleOnboarding(phone, message) {
+    let onboarding = getOnboarding(phone);
+
+    if (!onboarding) {
+        // First message ever — start onboarding
+        onboarding = createOnboarding(phone);
+
+        const welcomeMsg = `👋 Welcome to *Durauto Parts LLC* — Houston's heavy-duty truck parts distributor!
+
+To get started as a Durauto customer, I need a few quick details. Your application will be reviewed and approved within 24 hours.
+
+Let's begin! 🚛
+
+${ONBOARDING_STEPS[0].question}`;
+
+        await sendMessage(phone, welcomeMsg);
+        saveConversationMessage(phone, 'vertus', welcomeMsg);
+        return true;
+    }
+
+    const currentStep = onboarding.step;
+
+    // All steps completed — waiting for approval
+    if (currentStep >= ONBOARDING_STEPS.length) {
+        const waitMsg = `Your application is under review. We'll notify you as soon as you're approved — usually within 24 hours. 
+
+If you have urgent questions, call us directly at our Houston office.`;
+        await sendMessage(phone, waitMsg);
+        saveConversationMessage(phone, 'vertus', waitMsg);
+        return true;
+    }
+
+    // Save the answer to current step
+    const currentField = ONBOARDING_STEPS[currentStep].field;
+    const answer = message.trim().toLowerCase() === 'skip' ? '' : message.trim();
+    const nextStep = currentStep + 1;
+
+    updateOnboardingStep(phone, currentField, answer, nextStep);
+    saveConversationMessage(phone, 'customer', message);
+
+    if (nextStep < ONBOARDING_STEPS.length) {
+        // Ask next question
+        const nextQuestion = ONBOARDING_STEPS[nextStep].question;
+        await sendMessage(phone, nextQuestion);
+        saveConversationMessage(phone, 'vertus', nextQuestion);
+    } else {
+        // All done — save to customers table and notify
+        const updated = getOnboarding(phone);
+
+        // Update customer record with collected info
+        db.prepare(`
+            UPDATE customers SET
+                store_name = ?,
+                contact_name = ?,
+                email = ?,
+                address = ?,
+                status = 'pending'
+            WHERE phone = ?
+        `).run(
+            updated.store_name || 'Unknown Store',
+            updated.contact_name || 'Unknown Contact',
+            updated.email || '',
+            `${updated.address || ''}, ${updated.city_state || ''}`.trim(),
+            phone
+        );
+
+        const doneMsg = `✅ Thanks! Here's a summary of your application:
+
+🏪 Store: ${updated.store_name}
+📍 Address: ${updated.address}, ${updated.city_state}
+📧 Email: ${updated.email}
+👤 Contact: ${updated.contact_name} (${updated.designation})
+📞 Phone: ${updated.business_phone}
+
+Your application has been submitted to the Durauto team. We'll review it and reach out within 24 hours to get you set up.
+
+Talk soon! 🚛`;
+
+        await sendMessage(phone, doneMsg);
+        saveConversationMessage(phone, 'vertus', doneMsg);
+    }
+
+    return true;
+}
+
 // ─── Database Functions ───────────────────────────────────────────────────────
 
 function findProduct(searchTerm) {
@@ -153,8 +280,8 @@ function findOrCreateCustomer(phone) {
         const customerId = `CUST-${(count.count + 1).toString().padStart(3, '0')}`;
 
         db.prepare(`
-            INSERT INTO customers (customer_id, phone, store_name, contact_name, paused)
-            VALUES (?, ?, 'Unknown Store', 'Unknown Contact', 0)
+            INSERT INTO customers (customer_id, phone, store_name, contact_name, paused, status)
+            VALUES (?, ?, 'Unknown Store', 'Unknown Contact', 0, 'pending')
         `).run(customerId, normalizedPhone);
 
         customer = db.prepare(`
@@ -235,14 +362,45 @@ What you don't do:
 // ─── Main Chat Function ───────────────────────────────────────────────────────
 
 async function chat(customerPhone, userMessage) {
+    const normalizedPhone = customerPhone.replace('whatsapp:', '');
     const customer = findOrCreateCustomer(customerPhone);
+
+    // ─── Check customer status ────────────────────────────────────────────────
+
+    // Pending or no status — handle onboarding
+    if (!customer.status || customer.status === 'pending') {
+        const onboarding = getOnboarding(normalizedPhone);
+        const isComplete = onboarding && onboarding.step >= ONBOARDING_STEPS.length;
+
+        if (isComplete) {
+            // Application submitted, waiting for approval
+            const waitMsg = `Your application is still under review. We'll notify you as soon as you're approved — usually within 24 hours. 🕐`;
+            await sendMessage(normalizedPhone, waitMsg);
+            saveConversationMessage(normalizedPhone, 'vertus', waitMsg);
+            return null;
+        }
+
+        // Continue onboarding
+        await handleOnboarding(normalizedPhone, userMessage);
+        return null;
+    }
+
+    // Rejected
+    if (customer.status === 'rejected') {
+        const rejectedMsg = `Sorry, your application was not approved at this time. Please contact us directly at adhirajchaudhary@gmail.com for more information.`;
+        await sendMessage(normalizedPhone, rejectedMsg);
+        saveConversationMessage(normalizedPhone, 'vertus', rejectedMsg);
+        return null;
+    }
 
     // If customer is paused, just log the message and skip AI
     if (customer.paused) {
-        saveConversationMessage(customerPhone, 'customer', userMessage);
+        saveConversationMessage(normalizedPhone, 'customer', userMessage);
         console.log(`Customer ${customerPhone} is paused — message logged, no auto-reply`);
         return null;
     }
+
+    // ─── Approved customer — normal chat flow ─────────────────────────────────
 
     if (!conversations[customerPhone]) {
         conversations[customerPhone] = [];
@@ -287,10 +445,9 @@ async function chat(customerPhone, userMessage) {
                 results.forEach((p, i) => {
                     categoryContext += `${i + 1}. ${p.durauto_part_number} — ${p.part_name}\n`;
                 });
-                categoryContext += `\nTotal: ${results.length} products found. Customer can ask for details on any specific part.\n`;
+                categoryContext += `\nTotal: ${results.length} products found.\n`;
             }
         } else {
-            // Generic browse — show category summary
             const allCategories = db.prepare(`
                 SELECT category, COUNT(*) as count 
                 FROM products 
@@ -302,7 +459,6 @@ async function chat(customerPhone, userMessage) {
             allCategories.forEach(cat => {
                 categoryContext += `- ${cat.category}: ${cat.count} products\n`;
             });
-            categoryContext += '\nTell the customer what categories you carry and invite them to ask about a specific one.\n';
         }
     }
 
@@ -359,7 +515,7 @@ PRODUCT FOUND:
 
     const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${categoryContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
 
-    saveConversationMessage(customerPhone, 'customer', userMessage);
+    saveConversationMessage(normalizedPhone, 'customer', userMessage);
 
     history.push({
         role: "user",
@@ -406,10 +562,8 @@ PRODUCT FOUND:
                 const invoiceFilePath = await generateInvoice(order, customer, orderItems);
                 const invoiceFileName = `invoice_${orderId}.pdf`;
                 const invoiceUrl = `https://truck-parts-agent.onrender.com/invoices/${invoiceFileName}`;
-                console.log(`Invoice generated: ${invoiceFilePath}`);
-                console.log(`Invoice URL: ${invoiceUrl}`);
 
-                saveConversationMessage(customerPhone, 'vertus', vertusReply);
+                saveConversationMessage(normalizedPhone, 'vertus', vertusReply);
                 history.push({ role: "assistant", content: vertusReply });
                 return { reply: vertusReply, invoiceUrl, photoUrl: null };
             } catch (invoiceError) {
@@ -417,7 +571,6 @@ PRODUCT FOUND:
             }
         } else {
             vertusReply = vertusReply.replace(/\[SAVE_ORDER:[^\]]+\]/g, '').trim();
-            console.log('Blocked invalid SAVE_ORDER tag');
         }
     }
 
@@ -434,13 +587,12 @@ PRODUCT FOUND:
 
         if (productWithPhoto && productWithPhoto.photo_url) {
             photoUrl = productWithPhoto.photo_url;
-            console.log(`Photo found for ${partNumber}: ${photoUrl}`);
         }
 
         vertusReply = vertusReply.replace(/\[SEND_PHOTO:[^\]]+\]/g, '').trim();
     }
 
-    saveConversationMessage(customerPhone, 'vertus', vertusReply);
+    saveConversationMessage(normalizedPhone, 'vertus', vertusReply);
     history.push({ role: "assistant", content: vertusReply });
     return { reply: vertusReply, invoiceUrl: null, photoUrl };
 }
@@ -487,7 +639,6 @@ app.post('/webhook', async (req, res) => {
                 body: '📄 Your invoice:',
                 mediaUrl: [invoiceUrl]
             });
-            console.log(`Invoice sent: ${invoiceUrl}`);
         }
 
         if (photoUrl) {
@@ -497,7 +648,6 @@ app.post('/webhook', async (req, res) => {
                 body: '📸 Here is the product photo:',
                 mediaUrl: [photoUrl]
             });
-            console.log(`Photo sent: ${photoUrl}`);
         }
 
         console.log(`Reply sent to ${fromNumber}`);
@@ -540,7 +690,11 @@ app.get('/admin/dashboard', (req, res) => {
         .header { background: #1a5276; color: white; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
         .header h1 { font-size: 20px; font-weight: 600; }
         .header .status { font-size: 12px; background: #27ae60; padding: 4px 10px; border-radius: 12px; }
-        .container { display: flex; height: calc(100vh - 56px); }
+        .tabs { display: flex; background: #154360; }
+        .tab { padding: 10px 20px; color: rgba(255,255,255,0.7); cursor: pointer; font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent; }
+        .tab.active { color: white; border-bottom-color: #3498db; }
+        .tab-content { display: none; }
+        .tab-content.active { display: flex; height: calc(100vh - 96px); }
         .sidebar { width: 320px; background: white; border-right: 1px solid #e0e0e0; overflow-y: auto; flex-shrink: 0; }
         .sidebar-header { padding: 16px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #333; font-size: 14px; }
         .customer-item { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; transition: background 0.1s; }
@@ -550,11 +704,13 @@ app.get('/admin/dashboard', (req, res) => {
         .customer-phone { font-size: 12px; color: #888; margin-top: 2px; }
         .customer-last { font-size: 12px; color: #aaa; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
         .customer-time { font-size: 11px; color: #bbb; float: right; }
-        .paused-badge { font-size: 10px; background: #e74c3c; color: white; padding: 2px 6px; border-radius: 10px; margin-left: 6px; }
+        .paused-badge { font-size: 10px; background: #e74c3c; color: white; padding: 2px 6px; border-radius: 10px; margin-left: 4px; }
+        .pending-badge { font-size: 10px; background: #f39c12; color: white; padding: 2px 6px; border-radius: 10px; margin-left: 4px; }
         .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
         .chat-header { padding: 12px 20px; background: white; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; justify-content: space-between; }
         .chat-header-info h2 { font-size: 16px; font-weight: 600; color: #222; }
         .chat-header-info p { font-size: 12px; color: #888; margin-top: 2px; }
+        .header-btns { display: flex; gap: 8px; }
         .pause-btn { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.2s; }
         .pause-btn.paused { background: #e74c3c; color: white; }
         .pause-btn.active { background: #27ae60; color: white; }
@@ -572,17 +728,28 @@ app.get('/admin/dashboard', (req, res) => {
         .message.vertus .message-time { text-align: left; }
         .message-label { font-size: 11px; color: #888; margin-bottom: 3px; }
         .message.admin .message-label { text-align: right; }
-        .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 14px; }
+        .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 14px; flex-direction: column; gap: 8px; }
         .paused-banner { background: #fdf2f2; border-top: 1px solid #f5c6cb; padding: 8px 16px; font-size: 12px; color: #e74c3c; text-align: center; }
         .reply-box { padding: 12px 16px; background: white; border-top: 1px solid #e0e0e0; display: flex; gap: 10px; align-items: flex-end; }
         .reply-box textarea { flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 20px; font-size: 14px; resize: none; outline: none; font-family: inherit; max-height: 100px; }
         .reply-box textarea:focus { border-color: #1a5276; }
-        .send-btn { padding: 10px 20px; background: #1a5276; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 14px; font-weight: 600; white-space: nowrap; }
-        .send-btn:hover { background: #154360; }
-        .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .send-btn { padding: 10px 20px; background: #1a5276; color: white; border: none; border-radius: 20px; cursor: pointer; font-size: 14px; font-weight: 600; }
+        .send-btn:disabled { opacity: 0.5; }
         .refresh-bar { padding: 6px 16px; background: #f8f8f8; border-top: 1px solid #e0e0e0; font-size: 11px; color: #aaa; text-align: center; }
         .badge { background: #e74c3c; color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; margin-left: 6px; }
+        .pending-count { background: #f39c12; color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; margin-left: 6px; }
         .no-customers { padding: 20px; text-align: center; color: #aaa; font-size: 13px; }
+        .pending-list { flex: 1; overflow-y: auto; padding: 20px; }
+        .pending-card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .pending-card h3 { font-size: 16px; font-weight: 600; color: #222; margin-bottom: 12px; }
+        .pending-field { display: flex; margin-bottom: 8px; font-size: 14px; }
+        .pending-label { color: #888; width: 140px; flex-shrink: 0; }
+        .pending-value { color: #222; font-weight: 500; }
+        .pending-actions { display: flex; gap: 10px; margin-top: 16px; }
+        .approve-btn { padding: 10px 24px; background: #27ae60; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+        .reject-btn { padding: 10px 24px; background: #e74c3c; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+        .approve-btn:disabled, .reject-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .no-pending { text-align: center; color: #aaa; padding: 60px 20px; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -590,7 +757,13 @@ app.get('/admin/dashboard', (req, res) => {
         <h1>🚛 Vertus Admin Dashboard</h1>
         <span class="status">● Live</span>
     </div>
-    <div class="container">
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('conversations')">Conversations <span id="convCount"></span></div>
+        <div class="tab" onclick="switchTab('pending')">Pending Approvals <span id="pendingCount"></span></div>
+    </div>
+
+    <!-- Conversations Tab -->
+    <div class="tab-content active" id="tab-conversations">
         <div class="sidebar">
             <div class="sidebar-header">Customers <span id="customerCount"></span></div>
             <div id="customerList"></div>
@@ -615,24 +788,43 @@ app.get('/admin/dashboard', (req, res) => {
             <div class="refresh-bar">Auto-refreshes every 10 seconds</div>
         </div>
     </div>
+
+    <!-- Pending Tab -->
+    <div class="tab-content" id="tab-pending">
+        <div class="pending-list" id="pendingList">
+            <div class="no-pending">Loading...</div>
+        </div>
+    </div>
+
     <script>
         let selectedPhone = null;
         let selectedPaused = false;
         const secret = new URLSearchParams(window.location.search).get('secret');
 
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach((t, i) => {
+                t.classList.toggle('active', (i === 0 && tab === 'conversations') || (i === 1 && tab === 'pending'));
+            });
+            document.getElementById('tab-conversations').classList.toggle('active', tab === 'conversations');
+            document.getElementById('tab-pending').classList.toggle('active', tab === 'pending');
+            if (tab === 'pending') loadPending();
+        }
+
         async function loadCustomers() {
             try {
                 const res = await fetch('/admin/api/customers?secret=' + secret);
                 const data = await res.json();
-                document.getElementById('customerCount').innerHTML =
-                    '<span class="badge">' + data.length + '</span>';
+                const approved = data.filter(c => c.status === 'approved' || !c.status);
+                document.getElementById('customerCount').innerHTML = '<span class="badge">' + approved.length + '</span>';
+                document.getElementById('convCount').innerHTML = '<span class="badge">' + approved.length + '</span>';
+
                 const list = document.getElementById('customerList');
-                if (data.length === 0) {
-                    list.innerHTML = '<div class="no-customers">No customers yet.<br>Messages will appear here when customers start chatting.</div>';
+                if (approved.length === 0) {
+                    list.innerHTML = '<div class="no-customers">No approved customers yet.</div>';
                     return;
                 }
                 list.innerHTML = '';
-                data.forEach(c => {
+                approved.forEach(c => {
                     const div = document.createElement('div');
                     div.className = 'customer-item' + (selectedPhone === c.phone ? ' active' : '');
                     div.onclick = () => selectCustomer(c.phone, c.store_name, c.contact_name, c.paused);
@@ -641,17 +833,109 @@ app.get('/admin/dashboard', (req, res) => {
                     const pausedBadge = c.paused ? '<span class="paused-badge">PAUSED</span>' : '';
                     div.innerHTML =
                         '<span class="customer-time">' + time + '</span>' +
-                        '<div class="customer-name">' + (c.store_name || 'Unknown Store') + pausedBadge + '</div>' +
+                        '<div class="customer-name">' + (c.store_name || 'Unknown') + pausedBadge + '</div>' +
                         '<div class="customer-phone">' + c.phone + '</div>' +
                         '<div class="customer-last">' + (c.last_message || 'No messages yet') + '</div>';
                     list.appendChild(div);
                 });
                 if (selectedPhone) {
-                    const current = data.find(c => c.phone === selectedPhone);
+                    const current = approved.find(c => c.phone === selectedPhone);
                     if (current) updatePauseButton(current.paused);
                 }
             } catch (err) {
                 console.error('Error loading customers:', err);
+            }
+        }
+
+        async function loadPending() {
+            try {
+                const res = await fetch('/admin/api/pending?secret=' + secret);
+                const data = await res.json();
+                document.getElementById('pendingCount').innerHTML =
+                    data.length > 0 ? '<span class="pending-count">' + data.length + '</span>' : '';
+
+                const list = document.getElementById('pendingList');
+                if (data.length === 0) {
+                    list.innerHTML = '<div class="no-pending">✅ No pending applications right now.</div>';
+                    return;
+                }
+                list.innerHTML = '';
+                data.forEach(app => {
+                    const card = document.createElement('div');
+                    card.className = 'pending-card';
+                    card.innerHTML =
+                        '<h3>' + (app.store_name || 'Unknown Store') + '</h3>' +
+                        '<div class="pending-field"><span class="pending-label">📍 Address</span><span class="pending-value">' + (app.address || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">🏙️ City/State</span><span class="pending-value">' + (app.city_state || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">📧 Email</span><span class="pending-value">' + (app.email || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">👤 Contact</span><span class="pending-value">' + (app.contact_name || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">💼 Designation</span><span class="pending-value">' + (app.designation || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">📞 Business Phone</span><span class="pending-value">' + (app.business_phone || '—') + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">📱 WhatsApp</span><span class="pending-value">' + app.customer_phone + '</span></div>' +
+                        '<div class="pending-field"><span class="pending-label">📅 Applied</span><span class="pending-value">' + new Date(app.created_at + ' UTC').toLocaleDateString() + '</span></div>' +
+                        (app.referral ? '<div class="pending-field"><span class="pending-label">🔗 Referral</span><span class="pending-value">' + app.referral + '</span></div>' : '') +
+                        '<div class="pending-actions">' +
+                        '<button class="approve-btn" id="approve-' + app.customer_phone + '" onclick="approveCustomer(\'' + app.customer_phone + '\', \'' + (app.store_name || '') + '\', \'' + (app.contact_name || '') + '\')">✅ Approve</button>' +
+                        '<button class="reject-btn" id="reject-' + app.customer_phone + '" onclick="rejectCustomer(\'' + app.customer_phone + '\')">❌ Reject</button>' +
+                        '</div>';
+                    list.appendChild(card);
+                });
+            } catch (err) {
+                console.error('Error loading pending:', err);
+            }
+        }
+
+        async function approveCustomer(phone, storeName, contactName) {
+            const btn = document.getElementById('approve-' + phone);
+            btn.disabled = true;
+            btn.textContent = 'Approving...';
+
+            try {
+                const res = await fetch('/admin/api/approve', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({secret, phone})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadPending();
+                    loadCustomers();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                    btn.disabled = false;
+                    btn.textContent = '✅ Approve';
+                }
+            } catch (err) {
+                alert('Error approving customer');
+                btn.disabled = false;
+                btn.textContent = '✅ Approve';
+            }
+        }
+
+        async function rejectCustomer(phone) {
+            if (!confirm('Are you sure you want to reject this application?')) return;
+            const btn = document.getElementById('reject-' + phone);
+            btn.disabled = true;
+            btn.textContent = 'Rejecting...';
+
+            try {
+                const res = await fetch('/admin/api/reject', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({secret, phone})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadPending();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                    btn.disabled = false;
+                    btn.textContent = '❌ Reject';
+                }
+            } catch (err) {
+                alert('Error rejecting customer');
+                btn.disabled = false;
+                btn.textContent = '❌ Reject';
             }
         }
 
@@ -663,9 +947,10 @@ app.get('/admin/dashboard', (req, res) => {
                 '<h2>' + (storeName || 'Unknown Store') + '</h2>' +
                 '<p>' + (contactName || '') + ' &bull; ' + phone + '</p>' +
                 '</div>' +
+                '<div class="header-btns">' +
                 '<button class="pause-btn" id="pauseBtn" onclick="togglePause()">' +
                 (paused ? '▶ Resume Vertus' : '⏸ Pause Vertus') +
-                '</button>';
+                '</button></div>';
             document.getElementById('pauseBtn').className = 'pause-btn ' + (paused ? 'paused' : 'active');
             document.getElementById('replyBox').style.display = 'flex';
             document.getElementById('pausedBanner').style.display = paused ? 'block' : 'none';
@@ -694,7 +979,7 @@ app.get('/admin/dashboard', (req, res) => {
                 updatePauseButton(data.paused);
                 loadCustomers();
             } catch (err) {
-                console.error('Error toggling pause:', err);
+                console.error('Error:', err);
             }
             btn.disabled = false;
         }
@@ -718,7 +1003,7 @@ app.get('/admin/dashboard', (req, res) => {
                     textarea.value = '';
                     loadMessages(selectedPhone);
                 } else {
-                    alert('Failed to send: ' + (data.error || 'Unknown error'));
+                    alert('Failed: ' + (data.error || 'Unknown error'));
                 }
             } catch (err) {
                 alert('Error sending message');
@@ -776,6 +1061,8 @@ app.get('/admin/dashboard', (req, res) => {
     res.send(html);
 });
 
+// ─── Admin API Routes ─────────────────────────────────────────────────────────
+
 app.get('/admin/api/customers', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
@@ -783,11 +1070,8 @@ app.get('/admin/api/customers', (req, res) => {
     try {
         const customers = db.prepare(`
             SELECT 
-                c.customer_id,
-                c.store_name,
-                c.contact_name,
-                c.phone,
-                c.paused,
+                c.customer_id, c.store_name, c.contact_name,
+                c.phone, c.paused, c.status,
                 conv.message as last_message,
                 conv.created_at as last_message_time
             FROM customers c
@@ -799,6 +1083,79 @@ app.get('/admin/api/customers', (req, res) => {
             ORDER BY conv.created_at DESC
         `).all();
         res.json(customers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/api/pending', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const pending = db.prepare(`
+            SELECT o.*, c.status
+            FROM onboarding o
+            LEFT JOIN customers c ON c.phone = o.customer_phone
+            WHERE o.step >= ? AND (c.status = 'pending' OR c.status IS NULL)
+            ORDER BY o.created_at DESC
+        `).all(ONBOARDING_STEPS.length);
+        res.json(pending);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/api/approve', async (req, res) => {
+    const { secret, phone } = req.body;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        const onboarding = db.prepare('SELECT * FROM onboarding WHERE customer_phone = ?').get(phone);
+        if (!onboarding) return res.status(404).json({ error: 'Application not found' });
+
+        // Update customer status to approved
+        db.prepare(`UPDATE customers SET status = 'approved' WHERE phone = ?`).run(phone);
+
+        // Send welcome message
+        const storeName = onboarding.store_name || 'there';
+        const contactName = onboarding.contact_name || '';
+
+        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!
+
+Your account has been approved. Here's what Vertus can help you with:
+
+🔍 Look up any part by number or category
+💰 Get your custom pricing instantly
+📸 View product photos
+🛒 Place orders and get instant PDF invoices
+📋 Check your order history
+
+Just send me a message to get started. What can I help you with today?`;
+
+        await sendMessage(phone, welcomeMsg);
+        saveConversationMessage(phone, 'vertus', welcomeMsg);
+
+        console.log(`Customer ${phone} approved and welcomed`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Approval error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/api/reject', async (req, res) => {
+    const { secret, phone } = req.body;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+
+    try {
+        db.prepare(`UPDATE customers SET status = 'rejected' WHERE phone = ?`).run(phone);
+
+        const rejectMsg = `Thank you for your interest in Durauto Parts. Unfortunately, we are unable to approve your application at this time. Please contact us at adhirajchaudhary@gmail.com for more information.`;
+        await sendMessage(phone, rejectMsg);
+        saveConversationMessage(phone, 'vertus', rejectMsg);
+
+        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -831,7 +1188,6 @@ app.post('/admin/api/toggle-pause', (req, res) => {
 
         const newPaused = customer.paused ? 0 : 1;
         db.prepare('UPDATE customers SET paused = ? WHERE phone = ?').run(newPaused, phone);
-        console.log(`Customer ${phone} paused: ${newPaused}`);
         res.json({ success: true, paused: newPaused });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -843,16 +1199,10 @@ app.post('/admin/api/send-message', async (req, res) => {
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
 
     try {
-        await twilioClient.messages.create({
-            from: process.env.TWILIO_WHATSAPP_NUMBER,
-            to: `whatsapp:${phone}`,
-            body: message
-        });
+        await sendMessage(phone, message);
         saveConversationMessage(phone, 'admin', message);
-        console.log(`Admin message sent to ${phone}: ${message}`);
         res.json({ success: true });
     } catch (err) {
-        console.error('Error sending admin message:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -871,21 +1221,15 @@ app.get('/admin/migrate', (req, res) => {
     } catch (err) {
         if (err.message.includes('duplicate column')) {
             results.push('ℹ️ photo_url already exists');
-        } else {
-            results.push(`❌ ${err.message}`);
-        }
+        } else results.push(`❌ ${err.message}`);
     }
 
     try {
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_phone TEXT,
-                role TEXT,
-                message TEXT,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        `);
+        db.exec(`CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_phone TEXT, role TEXT, message TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )`);
         results.push('✅ conversations table ready');
     } catch (err) {
         results.push(`❌ ${err.message}`);
@@ -897,9 +1241,31 @@ app.get('/admin/migrate', (req, res) => {
     } catch (err) {
         if (err.message.includes('duplicate column')) {
             results.push('ℹ️ paused column already exists');
-        } else {
-            results.push(`❌ ${err.message}`);
-        }
+        } else results.push(`❌ ${err.message}`);
+    }
+
+    try {
+        db.exec(`ALTER TABLE customers ADD COLUMN status TEXT DEFAULT 'pending'`);
+        results.push('✅ status column added');
+    } catch (err) {
+        if (err.message.includes('duplicate column')) {
+            results.push('ℹ️ status column already exists');
+        } else results.push(`❌ ${err.message}`);
+    }
+
+    try {
+        db.exec(`CREATE TABLE IF NOT EXISTS onboarding (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_phone TEXT UNIQUE, store_name TEXT,
+            address TEXT, city_state TEXT, email TEXT,
+            contact_name TEXT, designation TEXT,
+            business_phone TEXT, referral TEXT,
+            step INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )`);
+        results.push('✅ onboarding table ready');
+    } catch (err) {
+        results.push(`❌ ${err.message}`);
     }
 
     res.json({ success: true, results });
@@ -909,7 +1275,7 @@ app.get('/admin/view', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
 
-    const customers = db.prepare('SELECT customer_id, phone, store_name FROM customers').all();
+    const customers = db.prepare('SELECT customer_id, phone, store_name, status FROM customers').all();
     const pricing = db.prepare('SELECT * FROM customer_pricing').all();
     res.json({ customers, pricing });
 });
@@ -919,7 +1285,7 @@ app.get('/admin/set-price', (req, res) => {
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
 
     if (!customer_id || !part_number || !price) {
-        return res.send('Missing params. Use: ?secret=durauto2026&customer_id=CUST-001&part_number=DP-SC20&price=49.99');
+        return res.send('Missing params.');
     }
 
     try {
@@ -929,11 +1295,8 @@ app.get('/admin/set-price', (req, res) => {
             return res.json({ error: 'Customer not found', existing_customers: all });
         }
 
-        db.prepare(`
-            INSERT OR REPLACE INTO customer_pricing 
-            (customer_id, durauto_part_number, price, notes)
-            VALUES (?, ?, ?, ?)
-        `).run(customer_id, part_number, parseFloat(price), 'Set via admin URL');
+        db.prepare(`INSERT OR REPLACE INTO customer_pricing (customer_id, durauto_part_number, price, notes) VALUES (?, ?, ?, ?)`)
+            .run(customer_id, part_number, parseFloat(price), 'Set via admin URL');
 
         res.json({ success: true, customer: customer.store_name, part: part_number, price: parseFloat(price) });
     } catch (err) {
@@ -948,16 +1311,11 @@ app.get('/admin/import-pricing', async (req, res) => {
     try {
         const axios = require('axios');
         const { parse } = require('csv-parse/sync');
-
-        const response = await axios.get(
-            'https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/pricing.csv'
-        );
-
+        const response = await axios.get('https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/pricing.csv');
         const records = parse(response.data, { columns: true, skip_empty_lines: true, trim: true });
         const insertPrice = db.prepare(`INSERT OR REPLACE INTO customer_pricing (customer_id, durauto_part_number, price, notes) VALUES (?, ?, ?, ?)`);
 
-        let successCount = 0;
-        let errorCount = 0;
+        let successCount = 0, errorCount = 0;
         const results = [];
 
         for (const record of records) {
@@ -965,9 +1323,7 @@ app.get('/admin/import-pricing', async (req, res) => {
             const partNumber = record['durauto_part_number'] || '';
             const price = parseFloat(record['price'] || '0');
             const notes = record['notes'] || '';
-
             if (!customerId || !partNumber || isNaN(price)) { errorCount++; continue; }
-
             try {
                 insertPrice.run(customerId, partNumber, price, notes);
                 results.push(`✅ ${customerId} — ${partNumber} — $${price.toFixed(2)}`);
@@ -991,32 +1347,20 @@ app.get('/admin/import-photos', async (req, res) => {
     try {
         const axios = require('axios');
         const { parse } = require('csv-parse/sync');
-
-        const response = await axios.get(
-            'https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/photos.csv'
-        );
-
+        const response = await axios.get('https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/photos.csv');
         const records = parse(response.data, { columns: true, skip_empty_lines: true, trim: true });
 
-        let successCount = 0;
-        let errorCount = 0;
+        let successCount = 0, errorCount = 0;
         const results = [];
 
         for (const record of records) {
             const partNumber = record['durauto_part_number'] || '';
             const photoUrl = record['photo_url'] || '';
-
             if (!partNumber || !photoUrl) { errorCount++; continue; }
-
             try {
                 const result = db.prepare(`UPDATE products SET photo_url = ? WHERE durauto_part_number = ?`).run(photoUrl, partNumber);
-                if (result.changes > 0) {
-                    results.push(`✅ ${partNumber} — photo set`);
-                    successCount++;
-                } else {
-                    results.push(`⚠️ ${partNumber} — part not found`);
-                    errorCount++;
-                }
+                if (result.changes > 0) { results.push(`✅ ${partNumber}`); successCount++; }
+                else { results.push(`⚠️ ${partNumber} — not found`); errorCount++; }
             } catch (err) {
                 results.push(`❌ ${partNumber}: ${err.message}`);
                 errorCount++;
