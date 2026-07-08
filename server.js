@@ -60,7 +60,6 @@ function updateOnboardingStep(phone, field, value, nextStep) {
 
 function cleanAnswer(field, rawAnswer) {
     let answer = rawAnswer.trim();
-
     if (field === 'store_name') {
         answer = answer
             .replace(/^my store( name)? is\s*/i, '')
@@ -72,7 +71,6 @@ function cleanAnswer(field, rawAnswer) {
             .replace(/^name[:\s]+/i, '')
             .trim();
     }
-
     if (field === 'contact_name') {
         answer = answer
             .replace(/^my name is\s*/i, '')
@@ -82,23 +80,19 @@ function cleanAnswer(field, rawAnswer) {
             .replace(/^it'?s?\s*/i, '')
             .trim();
     }
-
     if (field === 'email') {
         const emailMatch = answer.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
         if (emailMatch) answer = emailMatch[0];
     }
-
     if (field === 'business_phone') {
         const phoneMatch = answer.match(/[\+\d\s\-\(\)]{7,}/);
         if (phoneMatch) answer = phoneMatch[0].trim();
     }
-
     return answer;
 }
 
 async function handleOnboarding(phone, message) {
     let onboarding = getOnboarding(phone);
-
     if (!onboarding) {
         onboarding = createOnboarding(phone);
         const welcomeMsg = `👋 Welcome to *Durauto Parts LLC* — Houston's heavy-duty truck parts distributor!\n\nTo get started as a Durauto customer, I need a few quick details. Your application will be reviewed and approved within 24 hours.\n\nLet's begin! 🚛\n\n${ONBOARDING_STEPS[0].question}`;
@@ -106,24 +100,19 @@ async function handleOnboarding(phone, message) {
         saveConversationMessage(phone, 'vertus', welcomeMsg);
         return;
     }
-
     const currentStep = onboarding.step;
-
     if (currentStep >= ONBOARDING_STEPS.length) {
         const waitMsg = `Your application is under review. We'll notify you as soon as you're approved — usually within 24 hours. 🕐`;
         await sendMessage(phone, waitMsg);
         saveConversationMessage(phone, 'vertus', waitMsg);
         return;
     }
-
     const currentField = ONBOARDING_STEPS[currentStep].field;
     const rawAnswer = message.trim().toLowerCase() === 'skip' ? '' : message.trim();
     const answer = rawAnswer ? cleanAnswer(currentField, rawAnswer) : '';
     const nextStep = currentStep + 1;
-
     updateOnboardingStep(phone, currentField, answer, nextStep);
     saveConversationMessage(phone, 'customer', message);
-
     if (nextStep < ONBOARDING_STEPS.length) {
         const nextQuestion = ONBOARDING_STEPS[nextStep].question;
         await sendMessage(phone, nextQuestion);
@@ -211,6 +200,18 @@ function saveConversationMessage(phone, role, message) {
     } catch (err) {}
 }
 
+function getTrackingUrl(carrier, trackingNumber) {
+    const carriers = {
+        'fedex': `https://www.fedex.com/fedextrack/?trknbr=${trackingNumber}`,
+        'ups': `https://www.ups.com/track?tracknum=${trackingNumber}`,
+        'usps': `https://tools.usps.com/go/TrackConfirmAction?qtc_tLabels1=${trackingNumber}`,
+        'dhl': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
+        'freight': null,
+    };
+    const key = carrier.toLowerCase().replace(/\s+/g, '');
+    return carriers[key] || null;
+}
+
 const systemPrompt = `
 You are Vertus, the ordering assistant for Durauto Parts LLC — a distributor of heavy-duty truck parts based in Houston, TX.
 
@@ -222,6 +223,7 @@ You help retail customers do the following:
 5. View product photos
 6. Browse products by category
 7. Check stock availability
+8. Track their orders
 
 Your personality:
 - Friendly, professional, and efficient
@@ -240,10 +242,9 @@ How you handle orders:
 - Only include the SAVE_ORDER tag after the customer confirms with yes
 
 How you handle photo requests:
-- When a customer asks to see a photo or image of a product, include this exact tag in your response:
+- When a customer asks to see a photo or image of a product, include this exact tag:
   [SEND_PHOTO: partNumber=X]
-- Replace X with the exact Durauto Part # of the product
-- Only include this tag if Photo Available is Yes for that product
+- Only include this tag if Photo Available is Yes
 - If Photo Available is No, tell the customer no photo is available yet
 
 How you handle product lookups:
@@ -257,10 +258,14 @@ How you handle stock availability:
 - If stock quantity is above 0, confirm it is in stock
 - Never reveal the exact stock number unless the customer specifically asks
 
+How you handle order tracking:
+- When tracking info is provided, share it clearly
+- Include carrier, tracking number, and expected delivery date
+- Include tracking URL if available
+
 How you handle category browsing:
-- When a customer asks what products you carry in a category, list them clearly and concisely
-- Show the part number, name, and whether it is in stock
-- Keep the list clean and invite them to ask for details on any specific part
+- List part number, name, and stock status
+- Invite them to ask for details on any specific part
 
 What you don't do:
 - Never guess product details
@@ -303,6 +308,43 @@ async function chat(customerPhone, userMessage) {
     const history = conversations[customerPhone];
     const messageLower = userMessage.toLowerCase();
 
+    // ─── Order Tracking Request ───────────────────────────────────────────────
+    let trackingContext = '';
+    const trackingMatch = userMessage.match(/DRA\d+/i);
+    if (trackingMatch || messageLower.includes('track') || messageLower.includes('where is my order') || messageLower.includes('shipping') || messageLower.includes('status of my order')) {
+        const orderId = trackingMatch ? trackingMatch[0].toUpperCase() : null;
+        if (orderId) {
+            const order = db.prepare(`SELECT * FROM orders WHERE order_id = ? AND customer_id = ?`).get(orderId, customer.customer_id);
+            if (order) {
+                const orderItems = db.prepare(`SELECT * FROM order_items WHERE order_id = ?`).all(orderId);
+                const trackingUrl = order.carrier && order.tracking_number ? getTrackingUrl(order.carrier, order.tracking_number) : null;
+                trackingContext = `\nORDER TRACKING:\n- Order ID: ${order.order_id}\n- Status: ${order.status}\n- Placed: ${order.created_at}\n`;
+                if (order.carrier) trackingContext += `- Carrier: ${order.carrier}\n`;
+                if (order.tracking_number) trackingContext += `- Tracking #: ${order.tracking_number}\n`;
+                if (order.estimated_delivery) trackingContext += `- Expected Delivery: ${order.estimated_delivery}\n`;
+                if (order.shipped_at) trackingContext += `- Shipped: ${order.shipped_at}\n`;
+                if (trackingUrl) trackingContext += `- Tracking URL: ${trackingUrl}\n`;
+                trackingContext += `Items:\n`;
+                orderItems.forEach(item => { trackingContext += `  • ${item.durauto_part_number} — ${item.part_name} x${item.quantity}\n`; });
+            } else {
+                trackingContext = `\nORDER TRACKING: Order ${orderId} not found for this customer.\n`;
+            }
+        } else {
+            // No specific order ID — show all recent orders with tracking
+            const recentOrders = db.prepare(`SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5`).all(customer.customer_id);
+            if (recentOrders.length > 0) {
+                trackingContext = '\nRECENT ORDER STATUSES:\n';
+                recentOrders.forEach(order => {
+                    trackingContext += `\n${order.order_id} — ${order.status}`;
+                    if (order.carrier) trackingContext += ` — ${order.carrier}`;
+                    if (order.tracking_number) trackingContext += ` #${order.tracking_number}`;
+                    if (order.estimated_delivery) trackingContext += ` — ETA: ${order.estimated_delivery}`;
+                    trackingContext += '\n';
+                });
+            }
+        }
+    }
+
     // ─── Category Browse ──────────────────────────────────────────────────────
     const browseKeywords = ['brake shoe', 'brake chamber', 'slack adjuster', 'manual slack', 'air brake', 'coolant reservoir', 'hub cap', 'air hose', 'what do you have', 'what have you got', 'show me all', 'list all', 'types of', 'kinds of', 'all your', 'what parts', 'what products', 'do you carry', 'do you sell', 'what brake', 'what slack', 'how many', 'what kind of'];
     const categorySearchTerms = [
@@ -339,7 +381,7 @@ async function chat(customerPhone, userMessage) {
         }
     }
 
-    // ─── Product Lookup — finds ALL products mentioned ────────────────────────
+    // ─── Product Lookup ───────────────────────────────────────────────────────
     const words = userMessage.split(/\s+/);
     let productContext = '';
     const foundProducts = [];
@@ -363,7 +405,6 @@ async function chat(customerPhone, userMessage) {
                 : product.restock_date
                     ? `Out of Stock — Expected restock: ${product.restock_date}`
                     : 'Out of Stock — Contact us for availability';
-
             productContext += `\nPRODUCT FOUND:\n- Durauto Part #: ${product.durauto_part_number}\n- Name: ${product.part_name}\n- Category: ${product.category} > ${product.sub_category}\n- Brand: ${product.brand}\n- Description: ${product.description}\n- Application: ${product.application}\n- Specification: ${product.specification}\n- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}\n- Weight: ${product.weight}\n- Stock Status: ${stockStatus}\n- Cross References: ${product.cross_references.join(', ')}\n- Photo Available: ${product.photo_url ? 'Yes' : 'No'}\n`;
         });
     }
@@ -375,7 +416,10 @@ async function chat(customerPhone, userMessage) {
         if (orderHistory.length > 0) {
             orderContext = '\nORDER HISTORY:\n';
             for (const order of orderHistory) {
-                orderContext += `\nOrder ${order.order_id} — ${order.created_at} — ${order.status}\n`;
+                orderContext += `\nOrder ${order.order_id} — ${order.created_at} — ${order.status}`;
+                if (order.carrier) orderContext += ` — ${order.carrier}`;
+                if (order.tracking_number) orderContext += ` #${order.tracking_number}`;
+                orderContext += '\n';
                 for (const item of order.items) orderContext += `  • ${item.durauto_part_number} — ${item.part_name} x${item.quantity}\n`;
             }
         } else {
@@ -383,7 +427,7 @@ async function chat(customerPhone, userMessage) {
         }
     }
 
-    const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${categoryContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
+    const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${categoryContext}${trackingContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
 
     saveConversationMessage(normalizedPhone, 'customer', userMessage);
     history.push({ role: "user", content: userMessage + systemData });
@@ -397,7 +441,6 @@ async function chat(customerPhone, userMessage) {
 
     let vertusReply = response.content[0].text;
 
-    // ─── Handle Order Saving ──────────────────────────────────────────────────
     const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]*)\]/g)];
     if (saveOrderMatches.length > 0) {
         const items = saveOrderMatches.map(match => ({
@@ -427,7 +470,6 @@ async function chat(customerPhone, userMessage) {
         }
     }
 
-    // ─── Handle Photo Requests ────────────────────────────────────────────────
     const photoMatch = vertusReply.match(/\[SEND_PHOTO: partNumber=([^\]]+)\]/);
     let photoUrl = null;
     if (photoMatch) {
@@ -516,6 +558,24 @@ app.get('/admin/api/customers', (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/admin/api/orders', (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    try {
+        const orders = db.prepare(`
+            SELECT o.*, c.store_name, c.phone
+            FROM orders o
+            LEFT JOIN customers c ON o.customer_id = c.customer_id
+            ORDER BY o.created_at DESC
+            LIMIT 100
+        `).all();
+        for (const order of orders) {
+            order.items = db.prepare(`SELECT * FROM order_items WHERE order_id = ?`).all(order.order_id);
+        }
+        res.json(orders);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/admin/api/pending', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
@@ -538,7 +598,7 @@ app.post('/admin/api/approve', async (req, res) => {
         db.prepare(`UPDATE customers SET status = 'approved' WHERE phone = ?`).run(phone);
         const contactName = onboarding ? (onboarding.contact_name || '') : '';
         const storeName = onboarding ? (onboarding.store_name || 'there') : 'there';
-        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history\n📦 Check stock availability\n\nJust send me a message to get started!`;
+        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history\n📦 Check stock availability\n🚚 Track your shipments\n\nJust send me a message to get started!`;
         await sendMessage(phone, welcomeMsg);
         saveConversationMessage(phone, 'vertus', welcomeMsg);
         res.json({ success: true });
@@ -555,6 +615,66 @@ app.post('/admin/api/reject', async (req, res) => {
         saveConversationMessage(phone, 'vertus', rejectMsg);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/admin/api/ship-order', async (req, res) => {
+    const { secret, order_id, carrier, tracking_number, estimated_delivery } = req.body;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    try {
+        const order = db.prepare('SELECT * FROM orders WHERE order_id = ?').get(order_id);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(order.customer_id);
+        if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+        const shippedAt = new Date().toISOString().split('T')[0];
+        db.prepare(`UPDATE orders SET status = 'shipped', carrier = ?, tracking_number = ?, estimated_delivery = ?, shipped_at = ? WHERE order_id = ?`).run(carrier, tracking_number, estimated_delivery || '', shippedAt, order_id);
+
+        const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order_id);
+        const itemsList = orderItems.map(item => `• ${item.quantity}x ${item.part_name} (${item.durauto_part_number})`).join('\n');
+        const trackingUrl = getTrackingUrl(carrier, tracking_number);
+
+        const shipMsg = `📦 Your order *${order_id}* has shipped!\n\nItems:\n${itemsList}\n\nCarrier: ${carrier}\nTracking #: ${tracking_number}${estimated_delivery ? `\nExpected delivery: ${estimated_delivery}` : ''}${trackingUrl ? `\nTrack here: ${trackingUrl}` : ''}\n\nReply "track ${order_id}" anytime to check your status.`;
+
+        await sendMessage(customer.phone, shipMsg);
+        saveConversationMessage(customer.phone, 'vertus', shipMsg);
+
+        console.log(`Order ${order_id} marked as shipped — notification sent to ${customer.phone}`);
+        res.json({ success: true, message: `Order ${order_id} shipped, customer notified` });
+    } catch (err) {
+        console.error('Ship order error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/ship-order', async (req, res) => {
+    const { secret, order_id, carrier, tracking, delivery } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    if (!order_id || !carrier || !tracking) return res.send('Missing params. Need: order_id, carrier, tracking, delivery(optional)');
+
+    try {
+        const order = db.prepare('SELECT * FROM orders WHERE order_id = ?').get(order_id);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(order.customer_id);
+        if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+        const shippedAt = new Date().toISOString().split('T')[0];
+        db.prepare(`UPDATE orders SET status = 'shipped', carrier = ?, tracking_number = ?, estimated_delivery = ?, shipped_at = ? WHERE order_id = ?`).run(carrier, tracking, delivery || '', shippedAt, order_id);
+
+        const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order_id);
+        const itemsList = orderItems.map(item => `• ${item.quantity}x ${item.part_name} (${item.durauto_part_number})`).join('\n');
+        const trackingUrl = getTrackingUrl(carrier, tracking);
+
+        const shipMsg = `📦 Your order *${order_id}* has shipped!\n\nItems:\n${itemsList}\n\nCarrier: ${carrier}\nTracking #: ${tracking}${delivery ? `\nExpected delivery: ${delivery}` : ''}${trackingUrl ? `\nTrack here: ${trackingUrl}` : ''}\n\nReply "track ${order_id}" anytime to check your status.`;
+
+        await sendMessage(customer.phone, shipMsg);
+        saveConversationMessage(customer.phone, 'vertus', shipMsg);
+
+        res.json({ success: true, message: `Order ${order_id} shipped, customer notified at ${customer.phone}` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/admin/api/messages', (req, res) => {
@@ -599,6 +719,10 @@ app.get('/admin/migrate', (req, res) => {
         [`ALTER TABLE products ADD COLUMN stock_quantity INTEGER DEFAULT 0`, 'stock_quantity column'],
         [`ALTER TABLE products ADD COLUMN restock_date TEXT`, 'restock_date column'],
         [`ALTER TABLE products ADD COLUMN stock_notes TEXT`, 'stock_notes column'],
+        [`ALTER TABLE orders ADD COLUMN carrier TEXT`, 'carrier column'],
+        [`ALTER TABLE orders ADD COLUMN tracking_number TEXT`, 'tracking_number column'],
+        [`ALTER TABLE orders ADD COLUMN estimated_delivery TEXT`, 'estimated_delivery column'],
+        [`ALTER TABLE orders ADD COLUMN shipped_at TEXT`, 'shipped_at column'],
     ];
     for (const [sql, name] of migrations) {
         try { db.exec(sql); results.push(`✅ ${name} added`); }
