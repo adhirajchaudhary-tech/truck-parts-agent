@@ -89,7 +89,6 @@ function cleanAnswer(field, rawAnswer) {
     }
 
     if (field === 'business_phone') {
-        // Extract just the phone number if they write a sentence
         const phoneMatch = answer.match(/[\+\d\s\-\(\)]{7,}/);
         if (phoneMatch) answer = phoneMatch[0].trim();
     }
@@ -168,7 +167,7 @@ function getCustomerPrice(customerId, durautoPartNumber) {
 
 function searchByCategory(searchTerm) {
     const term = searchTerm.trim().toUpperCase();
-    return db.prepare(`SELECT durauto_part_number, part_name, category, sub_category FROM products WHERE UPPER(category) LIKE ? OR UPPER(sub_category) LIKE ? OR UPPER(part_name) LIKE ? OR UPPER(description) LIKE ? ORDER BY category, part_name`).all(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+    return db.prepare(`SELECT durauto_part_number, part_name, category, sub_category, stock_quantity FROM products WHERE UPPER(category) LIKE ? OR UPPER(sub_category) LIKE ? OR UPPER(part_name) LIKE ? OR UPPER(description) LIKE ? ORDER BY category, part_name`).all(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
 }
 
 function generateOrderId() {
@@ -222,6 +221,7 @@ You help retail customers do the following:
 4. Get product specifications
 5. View product photos
 6. Browse products by category
+7. Check stock availability
 
 Your personality:
 - Friendly, professional, and efficient
@@ -250,12 +250,16 @@ How you handle product lookups:
 - Use ONLY the product data provided to you
 - Present specs in simple plain text — no markdown tables
 
+How you handle stock availability:
+- If stock quantity is 0, tell the customer it is currently out of stock
+- If restock date is available, mention when it is expected back
+- If stock quantity is above 0, confirm it is in stock
+- Never reveal the exact stock number unless the customer specifically asks
+
 How you handle category browsing:
 - When a customer asks what products you carry in a category, list them clearly and concisely
-- Show the part number and name for each product
-- Keep the list clean — just part number and name, no specs unless asked
-- After listing, invite them to ask for details on any specific part
-- If they ask what you carry generally, tell them the categories and how many products in each
+- Show the part number, name, and whether it is in stock
+- Keep the list clean and invite them to ask for details on any specific part
 
 What you don't do:
 - Never guess product details
@@ -320,7 +324,10 @@ async function chat(customerPhone, userMessage) {
             const results = searchByCategory(matched.search);
             if (results.length > 0) {
                 categoryContext = `\nCATEGORY SEARCH RESULTS for "${matched.search}":\n`;
-                results.forEach((p, i) => { categoryContext += `${i + 1}. ${p.durauto_part_number} — ${p.part_name}\n`; });
+                results.forEach((p, i) => {
+                    const stockStatus = p.stock_quantity > 0 ? `In Stock (${p.stock_quantity} units)` : 'Out of Stock';
+                    categoryContext += `${i + 1}. ${p.durauto_part_number} — ${p.part_name} — ${stockStatus}\n`;
+                });
                 categoryContext += `\nTotal: ${results.length} products found.\n`;
             }
         } else {
@@ -338,7 +345,14 @@ async function chat(customerPhone, userMessage) {
             const product = findProduct(cleaned);
             if (product) {
                 const customerPrice = getCustomerPrice(customer.customer_id, product.durauto_part_number);
-                productContext = `\nPRODUCT FOUND:\n- Durauto Part #: ${product.durauto_part_number}\n- Name: ${product.part_name}\n- Category: ${product.category} > ${product.sub_category}\n- Brand: ${product.brand}\n- Description: ${product.description}\n- Application: ${product.application}\n- Specification: ${product.specification}\n- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}\n- Weight: ${product.weight}\n- Cross References: ${product.cross_references.join(', ')}\n- Photo Available: ${product.photo_url ? 'Yes' : 'No'}\n`;
+                const stockQty = product.stock_quantity || 0;
+                const stockStatus = stockQty > 0
+                    ? `In Stock (${stockQty} units available)`
+                    : product.restock_date
+                        ? `Out of Stock — Expected restock: ${product.restock_date}`
+                        : 'Out of Stock — Contact us for availability';
+
+                productContext = `\nPRODUCT FOUND:\n- Durauto Part #: ${product.durauto_part_number}\n- Name: ${product.part_name}\n- Category: ${product.category} > ${product.sub_category}\n- Brand: ${product.brand}\n- Description: ${product.description}\n- Application: ${product.application}\n- Specification: ${product.specification}\n- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}\n- Weight: ${product.weight}\n- Stock Status: ${stockStatus}\n- Cross References: ${product.cross_references.join(', ')}\n- Photo Available: ${product.photo_url ? 'Yes' : 'No'}\n`;
                 break;
             }
         }
@@ -511,7 +525,7 @@ app.post('/admin/api/approve', async (req, res) => {
         db.prepare(`UPDATE customers SET status = 'approved' WHERE phone = ?`).run(phone);
         const contactName = onboarding ? (onboarding.contact_name || '') : '';
         const storeName = onboarding ? (onboarding.store_name || 'there') : 'there';
-        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history\n\nJust send me a message to get started!`;
+        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history\n📦 Check stock availability\n\nJust send me a message to get started!`;
         await sendMessage(phone, welcomeMsg);
         saveConversationMessage(phone, 'vertus', welcomeMsg);
         res.json({ success: true });
@@ -569,6 +583,9 @@ app.get('/admin/migrate', (req, res) => {
         [`ALTER TABLE products ADD COLUMN photo_url TEXT`, 'photo_url column'],
         [`ALTER TABLE customers ADD COLUMN paused INTEGER DEFAULT 0`, 'paused column'],
         [`ALTER TABLE customers ADD COLUMN status TEXT DEFAULT 'pending'`, 'status column'],
+        [`ALTER TABLE products ADD COLUMN stock_quantity INTEGER DEFAULT 0`, 'stock_quantity column'],
+        [`ALTER TABLE products ADD COLUMN restock_date TEXT`, 'restock_date column'],
+        [`ALTER TABLE products ADD COLUMN stock_notes TEXT`, 'stock_notes column'],
     ];
     for (const [sql, name] of migrations) {
         try { db.exec(sql); results.push(`✅ ${name} added`); }
@@ -602,7 +619,7 @@ app.get('/admin/set-price', (req, res) => {
     if (!customer_id || !part_number || !price) return res.send('Missing params.');
     try {
         const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(customer_id);
-        if (!customer) return res.json({ error: 'Not found', all: db.prepare('SELECT customer_id, phone FROM customers').all() });
+        if (!customer) return res.json({ error: 'Not found' });
         db.prepare(`INSERT OR REPLACE INTO customer_pricing (customer_id, durauto_part_number, price, notes) VALUES (?, ?, ?, ?)`).run(customer_id, part_number, parseFloat(price), 'Set via admin URL');
         res.json({ success: true, customer: customer.store_name, part: part_number, price: parseFloat(price) });
     } catch (err) { res.status(500).send('Error: ' + err.message); }
@@ -676,6 +693,32 @@ app.get('/admin/import-photos', async (req, res) => {
             try {
                 const result = db.prepare(`UPDATE products SET photo_url = ? WHERE durauto_part_number = ?`).run(photoUrl, partNumber);
                 if (result.changes > 0) { results.push(`✅ ${partNumber}`); successCount++; }
+                else { results.push(`⚠️ ${partNumber} not found`); errorCount++; }
+            } catch (err) { results.push(`❌ ${partNumber}: ${err.message}`); errorCount++; }
+        }
+        res.json({ success: true, updated: successCount, errors: errorCount, details: results });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/admin/import-inventory', async (req, res) => {
+    const { secret } = req.query;
+    if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
+    try {
+        const axios = require('axios');
+        const { parse } = require('csv-parse/sync');
+        const response = await axios.get('https://raw.githubusercontent.com/adhirajchaudhary-tech/truck-parts-agent/main/inventory.csv');
+        const records = parse(response.data, { columns: true, skip_empty_lines: true, trim: true });
+        let successCount = 0, errorCount = 0;
+        const results = [];
+        for (const record of records) {
+            const partNumber = record['durauto_part_number'] || '';
+            const stockQty = parseInt(record['stock_quantity'] || '0');
+            const restockDate = record['restock_date'] || '';
+            const notes = record['notes'] || '';
+            if (!partNumber) { errorCount++; continue; }
+            try {
+                const result = db.prepare(`UPDATE products SET stock_quantity = ?, restock_date = ?, stock_notes = ? WHERE durauto_part_number = ?`).run(stockQty, restockDate, notes, partNumber);
+                if (result.changes > 0) { results.push(`✅ ${partNumber} — ${stockQty} units`); successCount++; }
                 else { results.push(`⚠️ ${partNumber} not found`); errorCount++; }
             } catch (err) { results.push(`❌ ${partNumber}: ${err.message}`); errorCount++; }
         }
