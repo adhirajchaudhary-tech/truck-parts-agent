@@ -29,45 +29,42 @@ async function generateInvoice(order, customer, items) {
 
         doc.pipe(stream);
 
-        // ─── Colors ───────────────────────────────────────────
+        // ─── Colors ───────────────────────────────────────────────
         const darkGray = '#333333';
         const lightGray = '#f5f5f5';
         const borderGray = '#dddddd';
         const blue = '#1a5276';
 
-        // ─── Title ────────────────────────────────────────────
+        // ─── Title ────────────────────────────────────────────────
         doc.fontSize(20).fillColor(darkGray).font('Helvetica')
             .text('Invoice', 50, 40, { align: 'center', width: 495 });
 
         doc.moveTo(50, 65).lineTo(545, 65).strokeColor(borderGray).lineWidth(1).stroke();
 
-        // ─── Header Section ───────────────────────────────────
-        // Logo top left
+        // ─── Header: Logo + Company Info + Contact ────────────────
+        const headerTop = 75;
+
         if (fs.existsSync(logoPath)) {
-            doc.image(logoPath, 50, 75, { width: 120 });
+            doc.image(logoPath, 50, headerTop, { width: 130 });
         }
 
-        // Contact info top right
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
-            .text('Email: adhirajchaudhary@gmail.com', 300, 80, { align: 'right', width: 245 })
-            .text('Website: https://durautopartsusa.com/', 300, 95, { align: 'right', width: 245 });
+            .text('Email: adhirajchaudhary@gmail.com', 300, headerTop + 10, { align: 'right', width: 245 })
+            .text('Website: https://durautopartsusa.com/', 300, headerTop + 24, { align: 'right', width: 245 });
 
-        // Company info below logo — starts at y=155 to clear the logo
         doc.fontSize(11).fillColor(blue).font('Helvetica-Bold')
-            .text('Durauto Parts LLC', 50, 155);
+            .text('Durauto Parts LLC', 50, headerTop + 70);
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
-            .text('9100 Galveston Rd', 50, 170)
-            .text('Houston, TX 77034, United States', 50, 183)
-            .text('Powering Through Loads', 50, 196);
+            .text('9100 Galveston Rd', 50, headerTop + 84)
+            .text('Houston, TX 77034, United States', 50, headerTop + 97)
+            .text('Powering Through Loads', 50, headerTop + 110);
 
-        // Divider after header
         doc.moveTo(50, 215).lineTo(545, 215).strokeColor(borderGray).lineWidth(1).stroke();
 
-        // ─── Invoice Meta Row ──────────────────────────────────
+        // ─── Invoice Meta Row ──────────────────────────────────────
         const metaY = 225;
         const colW = 123;
 
-        // Labels
         doc.fontSize(8).fillColor('#888888').font('Helvetica')
             .text('INVOICE NO', 50, metaY)
             .text('INVOICE DATE', 50 + colW, metaY)
@@ -85,7 +82,6 @@ async function generateInvoice(order, customer, items) {
             day: '2-digit', month: 'short', year: 'numeric'
         });
 
-        // Values
         doc.fontSize(10).fillColor(darkGray).font('Helvetica-Bold')
             .text(`#${order.order_id}`, 50, metaY + 14)
             .text(invoiceDate, 50 + colW, metaY + 14);
@@ -94,10 +90,9 @@ async function generateInvoice(order, customer, items) {
         doc.font('Helvetica-Bold')
             .text(`$ ${total.toFixed(2)}`, 50 + colW * 3, metaY + 14);
 
-        // Divider
         doc.moveTo(50, metaY + 35).lineTo(545, metaY + 35).strokeColor(borderGray).lineWidth(1).stroke();
 
-        // ─── Billing / Shipping Address ────────────────────────
+        // ─── Billing / Shipping Address ────────────────────────────
         const addrY = metaY + 45;
 
         doc.fontSize(8).fillColor('#888888').font('Helvetica')
@@ -107,24 +102,49 @@ async function generateInvoice(order, customer, items) {
         const storeName = customer.store_name || 'Unknown Store';
         const address = customer.address || '';
         const phone = customer.phone ? customer.phone.replace('whatsapp:', '') : '';
+        const contactName = customer.contact_name || '';
 
+        // Store name bold
         doc.fontSize(10).fillColor(darkGray).font('Helvetica-Bold')
-            .text(storeName, 50, addrY + 14)
-            .text(storeName, 300, addrY + 14);
+            .text(storeName, 50, addrY + 15)
+            .text(storeName, 300, addrY + 15);
 
-        doc.fontSize(9).font('Helvetica').fillColor(darkGray)
-            .text(address, 50, addrY + 28, { width: 220 })
-            .text(`Phone: ${phone}`, 50, addrY + 41);
+        doc.fontSize(9).font('Helvetica').fillColor(darkGray);
 
-        doc.fontSize(9).font('Helvetica').fillColor(darkGray)
-            .text(address, 300, addrY + 28, { width: 220 })
-            .text(`Phone: ${phone}`, 300, addrY + 41);
+        // Left column — Billing
+        let leftY = addrY + 30;
+        if (contactName && contactName !== 'Unknown Contact') {
+            doc.text(contactName, 50, leftY, { width: 220 });
+            leftY += 13;
+        }
+        if (address) {
+            doc.text(address, 50, leftY, { width: 220 });
+            leftY += 13;
+        }
+        if (phone) {
+            doc.text(`Phone: ${phone}`, 50, leftY, { width: 220 });
+        }
 
-        // Divider
-        doc.moveTo(50, addrY + 62).lineTo(545, addrY + 62).strokeColor(borderGray).lineWidth(1).stroke();
+        // Right column — Shipping
+        let rightY = addrY + 30;
+        if (contactName && contactName !== 'Unknown Contact') {
+            doc.text(contactName, 300, rightY, { width: 220 });
+            rightY += 13;
+        }
+        if (address) {
+            doc.text(address, 300, rightY, { width: 220 });
+            rightY += 13;
+        }
+        if (phone) {
+            doc.text(`Phone: ${phone}`, 300, rightY, { width: 220 });
+        }
 
-        // ─── Items Table Header ────────────────────────────────
-        const tableY = addrY + 70;
+        // Divider after address section
+        const afterAddrY = Math.max(leftY, rightY) + 20;
+        doc.moveTo(50, afterAddrY).lineTo(545, afterAddrY).strokeColor(borderGray).lineWidth(1).stroke();
+
+        // ─── Items Table Header ────────────────────────────────────
+        const tableY = afterAddrY + 8;
 
         doc.rect(50, tableY, 495, 22).fillColor(lightGray).fill();
         doc.fontSize(9).fillColor(darkGray).font('Helvetica-Bold')
@@ -138,7 +158,7 @@ async function generateInvoice(order, customer, items) {
         doc.moveTo(50, tableY + 22).lineTo(545, tableY + 22)
             .strokeColor(borderGray).lineWidth(1).stroke();
 
-        // ─── Items ────────────────────────────────────────────
+        // ─── Items ────────────────────────────────────────────────
         let rowY = tableY + 32;
         items.forEach((item) => {
             const price = parseFloat(item.price_at_order) || 0;
@@ -158,8 +178,8 @@ async function generateInvoice(order, customer, items) {
                 .strokeColor(borderGray).lineWidth(0.5).stroke();
         });
 
-        // ─── Totals ───────────────────────────────────────────
-        const totalsX = 350;
+        // ─── Totals ───────────────────────────────────────────────
+        const totalsX = 360;
         const totalsY = rowY + 10;
 
         doc.fontSize(9).fillColor(darkGray).font('Helvetica')
