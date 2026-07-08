@@ -173,14 +173,6 @@ function saveOrder(customerId, items) {
     return orderId;
 }
 
-function getOrderHistory(customerId) {
-    const orders = db.prepare(`SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 10`).all(customerId);
-    for (const order of orders) {
-        order.items = db.prepare(`SELECT * FROM order_items WHERE order_id = ?`).all(order.order_id);
-    }
-    return orders;
-}
-
 function findOrCreateCustomer(phone) {
     const normalizedPhone = phone.replace('whatsapp:', '');
     let customer = db.prepare(`SELECT * FROM customers WHERE phone = ? OR phone = ?`).get(normalizedPhone, phone);
@@ -211,8 +203,6 @@ function getTrackingUrl(carrier, trackingNumber) {
     return carriers[key] || null;
 }
 
-// ─── Pending Return State ─────────────────────────────────────────────────────
-// Tracks customers who are mid-return flow waiting to send a photo
 const pendingReturns = {};
 
 const systemPrompt = `
@@ -220,13 +210,14 @@ You are Vertus, the ordering assistant for Durauto Parts LLC — a distributor o
 
 You help retail customers do the following:
 1. Place new orders by part number and quantity
-2. View their order history and track shipments
+2. View and analyze their complete order history
 3. Reorder from a previous order with option to adjust quantities
 4. Get product specifications
 5. View product photos
 6. Browse products by category
 7. Check stock availability
-8. Request order cancellations, changes, or returns
+8. Track their orders
+9. Request order cancellations, changes, or returns
 
 Your personality:
 - Friendly, professional, and efficient
@@ -261,24 +252,29 @@ How you handle stock availability:
 How you handle order tracking:
 - Share carrier, tracking number, expected delivery and URL if available
 
+How you handle order analytics questions:
+- You have access to the customer's COMPLETE order history with all dates and quantities
+- Use it to answer ANY question about their ordering patterns
+- Examples you can answer: total units ordered of a part, most ordered part, least ordered part, average order size, days between orders, spending totals, order frequency, time since last order, first order date, etc.
+- Calculate answers directly from the data — give specific numbers not vague answers
+- If they ask "how many total" for a specific part, sum all quantities for that part across all orders
+
 How you handle cancellation requests:
-- When a customer wants to cancel an order, include this tag:
-  [REQUEST_CANCEL: orderId=X, reason=Y]
-- Tell them the request has been logged and team will confirm within 24 hours
-- Do NOT auto-cancel
+- When a customer wants to cancel an order, include: [REQUEST_CANCEL: orderId=X, reason=Y]
+- Tell them the request is logged and team will confirm within 24 hours
 
 How you handle change requests:
-- When a customer wants to change an order, include this tag:
-  [REQUEST_CHANGE: orderId=X, details=Y]
-- Tell them the request has been logged and team will confirm within 24 hours
-- Do NOT auto-change
+- When a customer wants to change an order, include: [REQUEST_CHANGE: orderId=X, details=Y]
+- Tell them the request is logged and team will confirm within 24 hours
 
 How you handle return requests:
 - When a customer wants to return an order, first ask for the reason
-- Once they give a reason, include this tag and ask them to send a photo:
-  [REQUEST_RETURN: orderId=X, reason=Y]
-- Tell them to send a photo of the item as proof
-- Photo proof is required for all returns
+- Once they give a reason, include: [REQUEST_RETURN: orderId=X, reason=Y]
+- Then ask them to send a photo of the item as proof — photo is required
+
+How you handle category browsing:
+- List part number, name, and stock status
+- Invite them to ask for details
 
 What you don't do:
 - Never guess product details
@@ -321,17 +317,12 @@ async function chat(customerPhone, userMessage, mediaUrl) {
     // ─── Handle Return Photo Upload ───────────────────────────────────────────
     if (mediaUrl && pendingReturns[normalizedPhone]) {
         const pending = pendingReturns[normalizedPhone];
-        db.prepare(`
-            UPDATE order_requests SET photo_url = ?, status = 'pending_review'
-            WHERE id = ?
-        `).run(mediaUrl, pending.requestId);
+        db.prepare(`UPDATE order_requests SET photo_url = ?, status = 'pending_review' WHERE id = ?`).run(mediaUrl, pending.requestId);
         delete pendingReturns[normalizedPhone];
-
         const confirmMsg = `📸 Photo received! Your return request for *${pending.orderId}* is now complete.\n\nOur team will review it and get back to you within 24 hours with next steps.`;
         await sendMessage(normalizedPhone, confirmMsg);
         saveConversationMessage(normalizedPhone, 'vertus', confirmMsg);
         saveConversationMessage(normalizedPhone, 'customer', '[Photo uploaded]');
-        console.log(`Return photo received for ${pending.orderId}`);
         return null;
     }
 
@@ -359,18 +350,6 @@ async function chat(customerPhone, userMessage, mediaUrl) {
                 orderItems.forEach(item => { trackingContext += `  • ${item.durauto_part_number} — ${item.part_name} x${item.quantity}\n`; });
             } else {
                 trackingContext = `\nORDER TRACKING: Order ${orderId} not found for this customer.\n`;
-            }
-        } else {
-            const recentOrders = db.prepare(`SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5`).all(customer.customer_id);
-            if (recentOrders.length > 0) {
-                trackingContext = '\nRECENT ORDER STATUSES:\n';
-                recentOrders.forEach(order => {
-                    trackingContext += `\n${order.order_id} — ${order.status}`;
-                    if (order.carrier) trackingContext += ` — ${order.carrier}`;
-                    if (order.tracking_number) trackingContext += ` #${order.tracking_number}`;
-                    if (order.estimated_delivery) trackingContext += ` — ETA: ${order.estimated_delivery}`;
-                    trackingContext += '\n';
-                });
             }
         }
     }
@@ -439,22 +418,31 @@ async function chat(customerPhone, userMessage, mediaUrl) {
         });
     }
 
-    // ─── Order History ────────────────────────────────────────────────────────
+    // ─── Complete Order History for Analytics ─────────────────────────────────
+    const allOrders = db.prepare(`
+        SELECT * FROM orders
+        WHERE customer_id = ?
+        AND status != 'cancelled'
+        ORDER BY created_at ASC
+    `).all(customer.customer_id);
+
     let orderContext = '';
-    if (messageLower.includes('history') || messageLower.includes('last order') || messageLower.includes('previous order') || messageLower.includes('what did i order')) {
-        const orderHistory = getOrderHistory(customer.customer_id);
-        if (orderHistory.length > 0) {
-            orderContext = '\nORDER HISTORY:\n';
-            for (const order of orderHistory) {
-                orderContext += `\nOrder ${order.order_id} — ${order.created_at} — ${order.status}`;
-                if (order.carrier) orderContext += ` — ${order.carrier}`;
-                if (order.tracking_number) orderContext += ` #${order.tracking_number}`;
-                orderContext += '\n';
-                for (const item of order.items) orderContext += `  • ${item.durauto_part_number} — ${item.part_name} x${item.quantity}\n`;
+    if (allOrders.length > 0) {
+        orderContext = '\nCOMPLETE ORDER HISTORY (use this to answer any order-related questions including totals, frequency, patterns, analytics):\n';
+        for (const order of allOrders) {
+            const orderItems = db.prepare(`SELECT * FROM order_items WHERE order_id = ?`).all(order.order_id);
+            orderContext += `\nOrder ${order.order_id} — Date: ${order.created_at} — Status: ${order.status}`;
+            if (order.carrier) orderContext += ` — Carrier: ${order.carrier}`;
+            if (order.tracking_number) orderContext += ` — Tracking: ${order.tracking_number}`;
+            if (order.estimated_delivery) orderContext += ` — ETA: ${order.estimated_delivery}`;
+            orderContext += '\n';
+            for (const item of orderItems) {
+                orderContext += `  • ${item.durauto_part_number} — ${item.part_name} — Qty: ${item.quantity} — Price: $${item.price_at_order || 0}\n`;
             }
-        } else {
-            orderContext = '\nORDER HISTORY: No previous orders found.\n';
         }
+        orderContext += `\nTotal orders on record: ${allOrders.length}\n`;
+    } else {
+        orderContext = '\nORDER HISTORY: No previous orders found for this customer.\n';
     }
 
     const systemData = `\n\n[SYSTEM DATA — DO NOT SHOW RAW]:\n${productContext}${categoryContext}${trackingContext}${orderContext}\nCustomer: ${customer.store_name} (${customer.customer_id})`;
@@ -568,13 +556,10 @@ app.post('/webhook', async (req, res) => {
     const messageStatus = req.body.MessageStatus;
     const numMedia = parseInt(req.body.NumMedia || '0');
     const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
-    const mediaType = numMedia > 0 ? req.body.MediaContentType0 : null;
 
     if (!fromNumber) return res.sendStatus(200);
     if (messageStatus && !messageSid) return res.sendStatus(200);
     if (fromNumber === process.env.TWILIO_WHATSAPP_NUMBER) return res.sendStatus(200);
-
-    // Allow image-only messages for return photo uploads
     if (!incomingMessage && !mediaUrl) return res.sendStatus(200);
 
     const messageText = incomingMessage || '[Photo]';
@@ -606,6 +591,8 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 });
 
+// ─── Serve Invoice PDFs ───────────────────────────────────────────────────────
+
 app.get('/invoices/:filename', (req, res) => {
     const filePath = `/tmp/invoices/${req.params.filename}`;
     if (fs.existsSync(filePath)) {
@@ -617,11 +604,15 @@ app.get('/invoices/:filename', (req, res) => {
     }
 });
 
+// ─── Admin Dashboard ──────────────────────────────────────────────────────────
+
 app.get('/admin/dashboard', (req, res) => {
     const { secret } = req.query;
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
     res.sendFile(path.resolve('dashboard.html'));
 });
+
+// ─── Admin API ────────────────────────────────────────────────────────────────
 
 app.get('/admin/api/customers', (req, res) => {
     const { secret } = req.query;
@@ -644,8 +635,7 @@ app.get('/admin/api/orders', (req, res) => {
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
     try {
         const orders = db.prepare(`
-            SELECT o.*, c.store_name, c.phone
-            FROM orders o
+            SELECT o.*, c.store_name, c.phone FROM orders o
             LEFT JOIN customers c ON o.customer_id = c.customer_id
             ORDER BY o.created_at DESC LIMIT 100
         `).all();
@@ -661,8 +651,7 @@ app.get('/admin/api/requests', (req, res) => {
     if (secret !== 'durauto2026') return res.status(403).send('Forbidden');
     try {
         const requests = db.prepare(`
-            SELECT r.*, c.store_name, c.phone
-            FROM order_requests r
+            SELECT r.*, c.store_name, c.phone FROM order_requests r
             LEFT JOIN customers c ON r.customer_id = c.customer_id
             ORDER BY r.created_at DESC
         `).all();
@@ -676,14 +665,11 @@ app.post('/admin/api/resolve-request', async (req, res) => {
     try {
         const request = db.prepare('SELECT * FROM order_requests WHERE id = ?').get(request_id);
         if (!request) return res.status(404).json({ error: 'Request not found' });
-
         const customer = db.prepare('SELECT * FROM customers WHERE customer_id = ?').get(request.customer_id);
         const resolvedAt = new Date().toISOString().split('T')[0];
-
         db.prepare(`UPDATE order_requests SET status = ?, admin_notes = ?, resolved_at = ? WHERE id = ?`).run(action, admin_notes || '', resolvedAt, request_id);
 
         let customerMsg = '';
-
         if (request.request_type === 'cancel') {
             if (action === 'approved') {
                 db.prepare(`UPDATE orders SET status = 'cancelled' WHERE order_id = ?`).run(request.order_id);
@@ -710,7 +696,6 @@ app.post('/admin/api/resolve-request', async (req, res) => {
             await sendMessage(customer.phone, customerMsg);
             saveConversationMessage(customer.phone, 'vertus', customerMsg);
         }
-
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -737,7 +722,7 @@ app.post('/admin/api/approve', async (req, res) => {
         db.prepare(`UPDATE customers SET status = 'approved' WHERE phone = ?`).run(phone);
         const contactName = onboarding ? (onboarding.contact_name || '') : '';
         const storeName = onboarding ? (onboarding.store_name || 'there') : 'there';
-        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history\n📦 Check stock availability\n🚚 Track your shipments\n\nJust send me a message to get started!`;
+        const welcomeMsg = `🎉 Welcome to Durauto Parts, ${contactName || storeName}!\n\nYour account has been approved. Here's what Vertus can help you with:\n\n🔍 Look up any part by number or category\n💰 Get your custom pricing instantly\n📸 View product photos\n🛒 Place orders and get instant PDF invoices\n📋 Check your order history and analytics\n📦 Check stock availability\n🚚 Track your shipments\n\nJust send me a message to get started!`;
         await sendMessage(phone, welcomeMsg);
         saveConversationMessage(phone, 'vertus', welcomeMsg);
         res.json({ success: true });
