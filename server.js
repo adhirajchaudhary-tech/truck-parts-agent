@@ -249,6 +249,7 @@ How you handle photo requests:
 How you handle product lookups:
 - Use ONLY the product data provided to you
 - Present specs in simple plain text — no markdown tables
+- When multiple products are found, show details for each one
 
 How you handle stock availability:
 - If stock quantity is 0, tell the customer it is currently out of stock
@@ -302,6 +303,7 @@ async function chat(customerPhone, userMessage) {
     const history = conversations[customerPhone];
     const messageLower = userMessage.toLowerCase();
 
+    // ─── Category Browse ──────────────────────────────────────────────────────
     const browseKeywords = ['brake shoe', 'brake chamber', 'slack adjuster', 'manual slack', 'air brake', 'coolant reservoir', 'hub cap', 'air hose', 'what do you have', 'what have you got', 'show me all', 'list all', 'types of', 'kinds of', 'all your', 'what parts', 'what products', 'do you carry', 'do you sell', 'what brake', 'what slack', 'how many', 'what kind of'];
     const categorySearchTerms = [
         { keyword: 'brake shoe', search: 'brake shoe' },
@@ -325,7 +327,7 @@ async function chat(customerPhone, userMessage) {
             if (results.length > 0) {
                 categoryContext = `\nCATEGORY SEARCH RESULTS for "${matched.search}":\n`;
                 results.forEach((p, i) => {
-                    const stockStatus = p.stock_quantity > 0 ? `In Stock (${p.stock_quantity} units)` : 'Out of Stock';
+                    const stockStatus = p.stock_quantity > 0 ? `In Stock` : 'Out of Stock';
                     categoryContext += `${i + 1}. ${p.durauto_part_number} — ${p.part_name} — ${stockStatus}\n`;
                 });
                 categoryContext += `\nTotal: ${results.length} products found.\n`;
@@ -337,27 +339,36 @@ async function chat(customerPhone, userMessage) {
         }
     }
 
+    // ─── Product Lookup — finds ALL products mentioned ────────────────────────
     const words = userMessage.split(/\s+/);
     let productContext = '';
+    const foundProducts = [];
+
     for (const word of words) {
         const cleaned = word.replace(/[^a-zA-Z0-9\-]/g, '');
         if (cleaned.length > 3) {
             const product = findProduct(cleaned);
-            if (product) {
-                const customerPrice = getCustomerPrice(customer.customer_id, product.durauto_part_number);
-                const stockQty = product.stock_quantity || 0;
-                const stockStatus = stockQty > 0
-                    ? `In Stock (${stockQty} units available)`
-                    : product.restock_date
-                        ? `Out of Stock — Expected restock: ${product.restock_date}`
-                        : 'Out of Stock — Contact us for availability';
-
-                productContext = `\nPRODUCT FOUND:\n- Durauto Part #: ${product.durauto_part_number}\n- Name: ${product.part_name}\n- Category: ${product.category} > ${product.sub_category}\n- Brand: ${product.brand}\n- Description: ${product.description}\n- Application: ${product.application}\n- Specification: ${product.specification}\n- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}\n- Weight: ${product.weight}\n- Stock Status: ${stockStatus}\n- Cross References: ${product.cross_references.join(', ')}\n- Photo Available: ${product.photo_url ? 'Yes' : 'No'}\n`;
-                break;
+            if (product && !foundProducts.find(p => p.durauto_part_number === product.durauto_part_number)) {
+                foundProducts.push(product);
             }
         }
     }
 
+    if (foundProducts.length > 0) {
+        foundProducts.forEach(product => {
+            const customerPrice = getCustomerPrice(customer.customer_id, product.durauto_part_number);
+            const stockQty = product.stock_quantity || 0;
+            const stockStatus = stockQty > 0
+                ? `In Stock (${stockQty} units available)`
+                : product.restock_date
+                    ? `Out of Stock — Expected restock: ${product.restock_date}`
+                    : 'Out of Stock — Contact us for availability';
+
+            productContext += `\nPRODUCT FOUND:\n- Durauto Part #: ${product.durauto_part_number}\n- Name: ${product.part_name}\n- Category: ${product.category} > ${product.sub_category}\n- Brand: ${product.brand}\n- Description: ${product.description}\n- Application: ${product.application}\n- Specification: ${product.specification}\n- Price: ${customerPrice ? '$' + customerPrice : 'Contact us for pricing'}\n- Weight: ${product.weight}\n- Stock Status: ${stockStatus}\n- Cross References: ${product.cross_references.join(', ')}\n- Photo Available: ${product.photo_url ? 'Yes' : 'No'}\n`;
+        });
+    }
+
+    // ─── Order History ────────────────────────────────────────────────────────
     let orderContext = '';
     if (messageLower.includes('history') || messageLower.includes('last order') || messageLower.includes('previous order') || messageLower.includes('what did i order')) {
         const orderHistory = getOrderHistory(customer.customer_id);
@@ -386,6 +397,7 @@ async function chat(customerPhone, userMessage) {
 
     let vertusReply = response.content[0].text;
 
+    // ─── Handle Order Saving ──────────────────────────────────────────────────
     const saveOrderMatches = [...vertusReply.matchAll(/\[SAVE_ORDER: partNumber=([^,]+), quantity=(\d+), partName=([^,]+), price=([^\]]*)\]/g)];
     if (saveOrderMatches.length > 0) {
         const items = saveOrderMatches.map(match => ({
@@ -415,6 +427,7 @@ async function chat(customerPhone, userMessage) {
         }
     }
 
+    // ─── Handle Photo Requests ────────────────────────────────────────────────
     const photoMatch = vertusReply.match(/\[SEND_PHOTO: partNumber=([^\]]+)\]/);
     let photoUrl = null;
     if (photoMatch) {
